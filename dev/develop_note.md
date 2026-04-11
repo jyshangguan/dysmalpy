@@ -103,11 +103,11 @@ Converted all model computation files to use `jnp`:
 | `dysmalpy/special/bessel.py` | **New** | Modified Bessel K0/K1 (JAX-traceable) |
 | `dysmalpy/special/hyp2f1.py` | **New** | Gauss hypergeometric 2F1 (JAX-traceable) |
 | `dysmalpy/models/cube_processing.py` | **New** | JAX cube population functions |
-| `dysmalpy/fitting/jax_loss.py` | **New** | `make_jax_loss_function`, `make_jax_log_prob_function` |
+| `dysmalpy/fitting/jax_loss.py` | **New** | `make_jax_loss_function`, `make_jax_log_prob_function`, `_precompute_cube_ai` |
 | `dysmalpy/fitting/jax_optimize.py` | **New** | `JAXAdamFitter`, `JAXAdamResults` |
 | `dysmalpy/parameters.py` | Modified | Standalone DysmalParameter descriptor |
 | `dysmalpy/models/base.py` | Modified (major) | Metaclass, DysmalModel, constants, jnp, `v_circular` safe division |
-| `dysmalpy/models/model_set.py` | Modified | JAX cube integration, jnp, `get_param_storage_names()`, JAX array return from `simulate_cube` |
+| `dysmalpy/models/model_set.py` | Modified | JAX cube integration, jnp, `get_param_storage_names()`, JAX array return from `simulate_cube`, `ai_precomputed` parameter |
 | `dysmalpy/models/halos.py` | Modified | jnp + special functions, np.NaN → np.nan |
 | `dysmalpy/models/baryons.py` | Modified | jnp + special functions, NoordFlat float() fix, np.NaN → np.nan |
 | `dysmalpy/models/geometry.py` | Modified | jnp trig |
@@ -138,7 +138,6 @@ Converted all model computation files to use `jnp`:
 
 ### Medium Priority
 
-- [ ] **Fix `_make_cube_ai` for JIT**: Replace `np.vstack`/`np.atleast_2d` with `jnp.stack` in `_make_cube_ai()` (model_set.py:70) so the Adam optimizer can trace through the full `simulate_cube` path. This is the only remaining blocker for full JIT-compiled fitting.
 - [ ] **Benchmark**: Compare timing of old Cython vs new JAX cube population on GPU
 
 ### Phase 5: JAX-Accelerated Fitting [DONE]
@@ -150,7 +149,7 @@ Steps completed:
 2. Created `dysmalpy/fitting/jax_loss.py` — `make_jax_loss_function()` factory using `object.__setattr__` for tracer injection
 3. Created `dysmalpy/fitting/jax_optimize.py` — `JAXAdamFitter` class with `jax.value_and_grad` + Adam
 4. Added `make_jax_log_prob_function()` — wraps loss with JAX-traceable prior computation
-5. 9 Phase 5 tests in `tests/test_jax.py` (8 pass, 1 xfail for Adam smoke test)
+5. 9 Phase 5 tests in `tests/test_jax.py` (all pass, including Adam smoke test)
 
 Geometry parameters (inc, pa, xshift, yshift) are excluded from JAX tracing since they affect array shapes.
 
@@ -160,6 +159,7 @@ Additional fixes during Phase 5:
 - Converted `zheight.py`: `np.exp` → `jnp.exp`
 - Converted `dispersion_profiles.py`: `np.ones` → `jnp.ones`
 - Added `np.asarray()` in `observation.py` after `simulate_cube()` call for numpy compatibility
+- Fixed `_make_cube_ai` JIT issue: pre-compute sparse index array `ai` before tracing, pass via `simulate_cube(ai_precomputed=...)`
 
 ### Low Priority
 
@@ -170,6 +170,7 @@ Additional fixes during Phase 5:
 
 ### Completed (was TODO, now done)
 
+- [x] **Fix `_make_cube_ai` for JIT**: The sparse index array `ai` used by `populate_cube_jax_ais` depends on coordinate arrays that become JAX tracers under `jax.jit`. Fix: pre-compute `ai` with concrete values before JIT compilation in `jax_loss.py:_precompute_cube_ai()`, then pass it to `simulate_cube(ai_precomputed=...)`. Added `ai_precomputed` and `ai_sky_precomputed` optional parameters to `simulate_cube()`. All 73 tests now pass with zero xfails.
 - [x] **Complete kinematic_options.py conversion** (Phase 4 final piece): Replaced all remaining scipy dependencies with JAX-compatible implementations:
   - `scipy.optimize.newton` → JAX secant solver via `jax.lax.scan` (`_solve_adiabatic_sq`)
   - `scipy.interpolate.interp1d` → `_interp1d_extrap()` using `jnp.interp` with manual linear extrapolation via `jnp.where`
@@ -178,7 +179,7 @@ Additional fixes during Phase 5:
   - Key design decision: The secant solver evaluates the residual function using `interp(rprime, r1d, sqrt(vhalo_sq))` then squares the result, matching the original scipy behavior exactly. Using `interp(rprime, r1d, vhalo_sq)` directly gives different results when extrapolating because `(sqrt(extrap))^2 ≠ extrap(sqrt(y))` for linear extrapolation.
   - Added `import jax` for `jax.lax.scan`
 - [x] **Force float64**: `tests/conftest.py` sets `jax.config.update("jax_enable_x64", True)` before all tests
-- [x] **All 72 tests pass**: 27 existing tests + 45 JAX-specific tests (1 xfail) all pass
+- [x] **All 73 tests pass**: 27 existing tests + 46 JAX-specific tests all pass (zero xfails)
 - [x] **np.NaN → np.nan**: Fixed NumPy 2.0 compatibility across all files (19 files)
 - [x] **DysmalParameter returns descriptor from `__get__`**: Changed `__get__` to return `self` (the descriptor) instead of the value, enabling `model.param.prior = ...` pattern. Added numeric dunder methods (`__float__`, `__eq__`, `__add__`, `__jax_array__`, etc.) so the descriptor acts as a numeric proxy.
 - [x] **Added `__call__` to all models with `@staticmethod evaluate()`**: Geometry, DispersionConst, ZHeightGauss, ZHeightExp, Sersic, ExpDisk, DiskBulge, LinearDiskBulge, GaussianRing, BlackHole, all extinction models, all light distribution models, and most higher-order kinematics models now have explicit `__call__` that injects parameter values.
@@ -196,8 +197,6 @@ Additional fixes during Phase 5:
 2. **`jnp.DeviceArray` as return values**: `simulate_cube()` now returns JAX arrays. `observation.py` converts them to numpy via `np.asarray()`. Downstream code should handle both types or convert explicitly.
 
 3. **DysmalParameter descriptor aliasing**: Any code that stores `self.some_param` (a DysmalParameter descriptor) in another object's attribute will create a shared reference. Changes to the parameter value will silently affect both objects. Always use `float(self.some_param)` when storing parameter values in non-DysmalParameter containers. (This was the root cause of the NoordFlat bug.)
-
-4. **`_make_cube_ai` uses `np.vstack` on JAX arrays**: The cube setup function `_make_cube_ai()` (model_set.py:70) uses `np.vstack` which internally calls `np.atleast_2d` on the coordinate arrays. Since `Geometry.evaluate()` returns JAX arrays (using `jnp.sin/jnp.cos`), these are JAX arrays even when geometry params are concrete. When traced under `jax.jit`, this causes a `TracerArrayConversionError`. This blocks the full Adam optimizer smoke test. Fix: convert `np.vstack` to `jnp.stack` or similar JAX-compatible operation.
 
 ---
 
@@ -222,7 +221,7 @@ All 27 existing tests pass:
 - Model computations (NFW, Sersic, DiskBulge, TwoPowerHalo)
 - Utility functions
 - Cube helpers
-- Phase 5: Loss function correctness, gradient computation, log-prob function, Adam optimizer smoke test (xfail due to kinematic_options.py limitation)
+- Phase 5: Loss function correctness, gradient computation, log-prob function, Adam optimizer smoke test (all pass)
 
 See `tests/test_jax.py` for details.
 
@@ -244,4 +243,4 @@ Phase 1 (DysmalParameter) ──┐    │
 ```
 
 *Phase 4 complete — all scipy dependencies removed from kinematic_options.py
-*Phase 5 complete — loss function, log-prob, Adam optimizer all working. Full Adam smoke test blocked by `_make_cube_ai` numpy issue (separate fix needed)
+*Phase 5 complete — loss function, log-prob, Adam optimizer all working. All 73 tests pass with zero xfails.

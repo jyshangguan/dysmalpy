@@ -67,9 +67,13 @@ def _make_cube_ai(model, xgal, ygal, zgal, n_wholepix_z_min = 3,
     zi, yi, xi = np.indices(xgal.shape)
     full_ai = np.vstack([xi.flatten(), yi.flatten(), zi.flatten()])
 
-    origpos = np.vstack([xgal.flatten() - np.mean(xgal.flatten()) + xsize/2.,
-                         ygal.flatten() - np.mean(ygal.flatten()) + ysize/2.,
-                         zgal.flatten() - np.mean(zgal.flatten()) + zsize/2.])
+    xgal_np = np.asarray(xgal).flatten()
+    ygal_np = np.asarray(ygal).flatten()
+    zgal_np = np.asarray(zgal).flatten()
+
+    origpos = np.vstack([xgal_np - np.mean(xgal_np) + xsize/2.,
+                         ygal_np - np.mean(ygal_np) + ysize/2.,
+                         zgal_np - np.mean(zgal_np) + zsize/2.])
 
 
     validpts = np.where( (origpos[0,:] >= 0.) & (origpos[0,:] <= xsize) & \
@@ -1261,7 +1265,8 @@ class ModelSet:
                 f.write(datstr+'\n')
 
 
-    def simulate_cube(self, obs=None, dscale=None):
+    def simulate_cube(self, obs=None, dscale=None, ai_precomputed=None,
+                      ai_sky_precomputed=None):
         r"""
         Simulate a line emission cube of this model set
 
@@ -1272,6 +1277,16 @@ class ModelSet:
 
         dscale : float
             Conversion from sky to physical coordinates in arcsec/kpc
+
+        ai_precomputed : array (3, N) or None
+            Pre-computed sparse index array for z-truncation (direct method).
+            If provided, skips the internal ``_make_cube_ai`` call (needed for
+            JIT tracing).
+
+        ai_sky_precomputed : array (3, N) or None
+            Pre-computed sparse index array for z-truncation (rotate method).
+            If provided, skips the internal ``_make_cube_ai`` call for the
+            sky-frame path (needed for JIT tracing).
 
         Returns
         -------
@@ -1518,9 +1533,12 @@ class ModelSet:
                 # +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
                 if zcalc_truncate:
                     # Truncate in the z direction by flagging what pixels to include in propogation
-                    ai = _make_cube_ai(self, xgal, ygal, zgal, n_wholepix_z_min=n_wholepix_z_min,
-                        pixscale=pixscale_samp, oversample=oversample,
-                        dscale=dscale, maxr=maxr/2., maxr_y=maxr_y/2.)
+                    if ai_precomputed is not None:
+                        ai = ai_precomputed
+                    else:
+                        ai = _make_cube_ai(self, xgal, ygal, zgal, n_wholepix_z_min=n_wholepix_z_min,
+                            pixscale=pixscale_samp, oversample=oversample,
+                            dscale=dscale, maxr=maxr/2., maxr_y=maxr_y/2.)
                     cube_final += populate_cube_jax_ais(
                         jnp.asarray(flux_mass), jnp.asarray(vobs_mass),
                         jnp.asarray(sigmar), jnp.asarray(vx), jnp.asarray(ai))
@@ -1649,10 +1667,13 @@ class ModelSet:
 
                     #######
                     # Truncate in the z direction by flagging what pixels to include in propogation
-                    ai_sky = _make_cube_ai(self, xgal_final, ygal_final, zgal_final,
-                            n_wholepix_z_min=n_wholepix_z_min,
-                            pixscale=pixscale_samp, oversample=oversample,
-                            dscale=dscale, maxr=maxr/2., maxr_y=maxr_y_final/2.)
+                    if ai_sky_precomputed is not None:
+                        ai_sky = ai_sky_precomputed
+                    else:
+                        ai_sky = _make_cube_ai(self, xgal_final, ygal_final, zgal_final,
+                                n_wholepix_z_min=n_wholepix_z_min,
+                                pixscale=pixscale_samp, oversample=oversample,
+                                dscale=dscale, maxr=maxr/2., maxr_y=maxr_y_final/2.)
                     cube_final += populate_cube_jax_ais(
                         jnp.asarray(flux_mass_transf), jnp.asarray(vobs_mass_transf),
                         jnp.asarray(sigmar_transf), jnp.asarray(vx), jnp.asarray(ai_sky))

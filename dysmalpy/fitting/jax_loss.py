@@ -21,6 +21,112 @@ import numpy as np
 __all__ = ['make_jax_loss_function', 'make_jax_log_prob_function']
 
 
+def _precompute_cube_ai(model_set, obs, dscale):
+    """Pre-compute sparse index arrays (ai) for z-truncation.
+
+    Runs the grid setup from ``simulate_cube`` with concrete (non-traced)
+    values to produce ``ai`` and ``ai_sky``.  These are then passed into
+    ``simulate_cube(ai_precomputed=...)`` so that the JIT-compiled loss
+    function never calls ``_make_cube_ai`` (which would require dynamic
+    boolean indexing on traced arrays).
+
+    Returns
+    -------
+    dict
+        ``{'ai': array or None, 'ai_sky': array or None}``
+    """
+    from astropy import units as u
+
+    from dysmalpy.models.model_set import (
+        _calculate_max_skyframe_extents,
+        _get_xyz_sky_gal,
+        _get_xyz_sky_gal_inverse,
+        _make_cube_ai,
+    )
+
+    if not obs.mod_options.zcalc_truncate:
+        return {'ai': None, 'ai_sky': None}
+
+    result = {'ai': None, 'ai_sky': None}
+
+    nx_sky = obs.instrument.fov[0]
+    ny_sky = obs.instrument.fov[1]
+    pixscale = obs.instrument.pixscale.to(u.arcsec).value
+    oversample = obs.mod_options.oversample
+    oversize = obs.mod_options.oversize
+    xcenter = obs.mod_options.xcenter
+    ycenter = obs.mod_options.ycenter
+    transform_method = obs.mod_options.transform_method
+    n_wholepix_z_min = obs.mod_options.n_wholepix_z_min
+
+    nx_sky_samp = nx_sky * oversample * oversize
+    ny_sky_samp = ny_sky * oversample * oversize
+    pixscale_samp = pixscale / oversample
+
+    if (np.mod(nx_sky, 2) == 1) & (np.mod(oversize, 2) == 0) & (oversize > 1):
+        nx_sky_samp = nx_sky_samp + 1
+    if (np.mod(ny_sky, 2) == 1) & (np.mod(oversize, 2) == 0) & (oversize > 1):
+        ny_sky_samp = ny_sky_samp + 1
+
+    if xcenter is None:
+        xcenter_samp = (nx_sky_samp - 1) / 2.
+    else:
+        xcenter_samp = (xcenter + 0.5) * oversample - 0.5
+    if ycenter is None:
+        ycenter_samp = (ny_sky_samp - 1) / 2.
+    else:
+        ycenter_samp = (ycenter + 0.5) * oversample - 0.5
+
+    geom = model_set.geometries.get(obs.name)
+    if geom is None:
+        return result
+
+    nz_sky_samp, maxr, maxr_y = _calculate_max_skyframe_extents(
+        geom, nx_sky_samp, ny_sky_samp, transform_method)
+
+    sh = (nz_sky_samp, ny_sky_samp, nx_sky_samp)
+
+    # Temporarily apply oversample to geometry shifts
+    orig_xshift = geom.xshift.value
+    orig_yshift = geom.yshift.value
+    geom.xshift = orig_xshift * oversample
+    geom.yshift = orig_yshift * oversample
+
+    try:
+        if transform_method.lower().strip() == 'direct':
+            xgal, ygal, zgal, _, _, _ = _get_xyz_sky_gal(
+                geom, sh, xcenter_samp, ycenter_samp, (nz_sky_samp - 1) / 2.)
+            ai = _make_cube_ai(model_set, xgal, ygal, zgal,
+                               n_wholepix_z_min=n_wholepix_z_min,
+                               pixscale=pixscale_samp, oversample=oversample,
+                               dscale=dscale, maxr=maxr / 2., maxr_y=maxr_y / 2.)
+            result['ai'] = np.asarray(ai)
+
+        elif transform_method.lower().strip() == 'rotate':
+            xgal, ygal, zgal, _, _, _ = _get_xyz_sky_gal_inverse(
+                geom, sh, xcenter_samp, ycenter_samp, (nz_sky_samp - 1) / 2.)
+
+            # For the rotate path, also compute ai_sky
+            xgal_final, ygal_final, zgal_final, _, _, _ = _get_xyz_sky_gal_inverse(
+                geom, sh, xcenter_samp, ycenter_samp, (nz_sky_samp - 1) / 2.)
+
+            _, _, maxr_y_final = _calculate_max_skyframe_extents(
+                geom, nx_sky_samp, ny_sky_samp, 'direct', angle='cos')
+
+            ai_sky = _make_cube_ai(model_set, xgal_final, ygal_final, zgal_final,
+                                    n_wholepix_z_min=n_wholepix_z_min,
+                                    pixscale=pixscale_samp, oversample=oversample,
+                                    dscale=dscale,
+                                    maxr=maxr / 2., maxr_y=maxr_y_final / 2.)
+            result['ai_sky'] = np.asarray(ai_sky)
+    finally:
+        # Restore original geometry shifts
+        geom.xshift = orig_xshift
+        geom.yshift = orig_yshift
+
+    return result
+
+
 def _storage_name(name):
     """Return the instance-attribute name used to store *name*'s value."""
     return '_param_value_{}'.format(name)
@@ -114,6 +220,16 @@ def make_jax_loss_function(model_set, obs, dscale, cube_obs, noise,
 
     reindexed, n_traceable, orig_theta_indices = _identify_traceable_params(model_set)
 
+    # Pre-compute the sparse index array (ai) for z-truncation using
+    # concrete (non-traced) values.  This avoids dynamic boolean indexing
+    # inside the JIT-compiled loss function.
+    ai_precomputed = None
+    ai_sky_precomputed = None
+    if obs.mod_options.zcalc_truncate:
+        _ai_precomputed = _precompute_cube_ai(model_set, obs, dscale)
+        ai_precomputed = _ai_precomputed.get('ai')
+        ai_sky_precomputed = _ai_precomputed.get('ai_sky')
+
     def _inject_tracers(theta_traceable):
         """Inject JAX tracer values into model parameter storage."""
         for (cmp_name, param_name), theta_idx in reindexed:
@@ -124,7 +240,9 @@ def make_jax_loss_function(model_set, obs, dscale, cube_obs, noise,
     def jax_chi2(theta_traceable):
         _inject_tracers(theta_traceable)
 
-        cube_model, _ = model_set.simulate_cube(obs, dscale)
+        cube_model, _ = model_set.simulate_cube(obs, dscale,
+                                                 ai_precomputed=ai_precomputed,
+                                                 ai_sky_precomputed=ai_sky_precomputed)
 
         if mask_jax is not None:
             chi_sq = jnp.sum(
