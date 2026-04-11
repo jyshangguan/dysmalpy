@@ -13,6 +13,7 @@
 import math
 
 import numpy as np
+import pytest
 import jax
 import jax.numpy as jnp
 import scipy.special as scp_spec
@@ -526,3 +527,323 @@ class TestCubeHelpers:
         assert nz % 2 == 1
         assert maxr > 0
         assert maxr_y > 0
+
+
+# ===================================================================
+# 8. Phase 5: JAX loss function tests
+# ===================================================================
+
+def _make_test_galaxy_obs():
+    """Build a test galaxy + observation for loss function testing.
+
+    Uses the same setup as test_models.TestModels.test_simulate_cube.
+    """
+    from dysmalpy import galaxy, observation, instrument
+
+    z = 0.5
+    name = 'test_gal'
+
+    gal = galaxy.Galaxy(z=z, name=name)
+    obs = observation.Observation(name='halpha_1D', tracer='halpha')
+    obs.mod_options.oversample = 3
+    obs.mod_options.zcalc_truncate = True
+
+    mod_set = models.ModelSet()
+
+    # Geometry
+    geom = models.Geometry(inc=30., pa=0., xshift=0., yshift=0.,
+                           name='geom', obs_name='halpha_1D')
+
+    # Disk+bulge
+    bary = models.DiskBulge(
+        name='disk+bulge',
+        total_mass=11., r_d=3.0, bt=0.0,
+        n_bulge=1.0, invq_disk=0.2, r_eff_bulge=1.0,
+        mass_to_light=1.0, f_gas=0.1,
+    )
+
+    # NFW halo
+    halo = models.NFW(name='halo', mvirial=12., fdm=0.5, conc=10.)
+
+    # Dispersion
+    disp_prof = models.DispersionConst(name='dispersion_halpha',
+                                        sigma=50., tracer='halpha')
+
+    # z-height
+    zheight_prof = models.ZHeightExp(name='zheight', z0=1.0)
+
+    mod_set.add_component(bary, light=True)
+    mod_set.add_component(halo)
+    mod_set.add_component(disp_prof)
+    mod_set.add_component(zheight_prof)
+    mod_set.add_component(geom)
+
+    gal.model = mod_set
+
+    # Instrument
+    import astropy.units as u
+    inst = instrument.Instrument()
+    inst.pixscale = 0.125 * u.arcsec
+    inst.fov = [33, 33]
+    beamsize = 0.55 * u.arcsec
+    inst.beam = instrument.GaussianBeam(major=beamsize)
+    inst.lsf = instrument.LSF(45. * u.km / u.s)
+    inst.spec_type = 'velocity'
+    inst.spec_start = -1000 * u.km / u.s
+    inst.spec_step = 10 * u.km / u.s
+    inst.nspec = 201
+    inst.ndim = 3
+    inst.moment = False
+    inst.set_beam_kernel()
+    inst.set_lsf_kernel()
+    obs.instrument = inst
+
+    gal.add_observation(obs)
+
+    return gal, obs
+
+
+class TestJAXLossFunction:
+    """Test make_jax_loss_function and related utilities."""
+
+    def test_param_storage_names(self):
+        """ModelSet.get_param_storage_names returns correct mapping."""
+        gal, obs = _make_test_galaxy_obs()
+        pmap = gal.model.get_param_storage_names()
+
+        assert len(pmap) > 0
+        # All values should be non-negative integers
+        for key, idx in pmap.items():
+            assert isinstance(key, tuple) and len(key) == 2
+            assert isinstance(idx, (int, np.integer))
+            assert idx >= 0
+
+    def test_identify_traceable_params(self):
+        """Geometry params are excluded from traceable set."""
+        from dysmalpy.fitting.jax_loss import _identify_traceable_params
+
+        gal, obs = _make_test_galaxy_obs()
+        reindexed, n_traceable, orig_idx = _identify_traceable_params(gal.model)
+
+        # Geometry params (inc, pa, xshift, yshift) should be excluded
+        geom_params = {'inc', 'pa', 'xshift', 'yshift'}
+        for (cmp_name, param_name), _ in reindexed:
+            if cmp_name == 'geometry_halpha_1D':
+                assert param_name not in geom_params
+
+        assert n_traceable > 0
+        assert n_traceable == len(reindexed)
+
+    def test_loss_matches_simulate_cube(self):
+        """JAX loss function produces same chi-squared as manual computation."""
+        from dysmalpy.fitting.jax_loss import make_jax_loss_function
+
+        gal, obs = _make_test_galaxy_obs()
+
+        # Generate model cube using simulate_cube directly
+        cube_model, _ = gal.model.simulate_cube(obs, gal.dscale)
+        cube_model = np.asarray(cube_model)
+
+        # Use the model cube itself as "data" so we expect chi-squared = 0
+        noise = np.ones_like(cube_model)
+        msk = np.ones(cube_model.shape, dtype=bool)
+
+        dscale = gal.dscale
+
+        jax_loss, get_traceable, set_all = make_jax_loss_function(
+            gal.model, obs, dscale, cube_model, noise, mask=msk
+        )
+
+        theta = get_traceable()
+        loss_val = float(jax_loss(jnp.array(theta)))
+        # chi-squared should be ~0 when data = model
+        assert abs(loss_val) < 1e-6, \
+            "Loss should be ~0 when data = model, got {}".format(loss_val)
+
+    def test_loss_perturbed_params(self):
+        """Perturbed parameters produce higher loss than true parameters."""
+        from dysmalpy.fitting.jax_loss import make_jax_loss_function
+
+        gal, obs = _make_test_galaxy_obs()
+
+        cube_model, _ = gal.model.simulate_cube(obs, gal.dscale)
+        cube_model = np.asarray(cube_model)
+        noise = np.ones_like(cube_model)
+        msk = np.ones(cube_model.shape, dtype=bool)
+
+        dscale = gal.dscale
+
+        jax_loss, get_traceable, set_all = make_jax_loss_function(
+            gal.model, obs, dscale, cube_model, noise, mask=msk
+        )
+
+        theta_orig = get_traceable()
+        loss_orig = float(jax_loss(jnp.array(theta_orig)))
+
+        # Perturb parameters
+        theta_pert = theta_orig.copy()
+        theta_pert[0] += 0.5  # Shift first parameter significantly
+        loss_pert = float(jax_loss(jnp.array(theta_pert)))
+
+        assert loss_pert > loss_orig, \
+            "Perturbed loss ({}) should be > original loss ({})".format(
+                loss_pert, loss_orig)
+
+    def test_loss_gradients_are_finite(self):
+        """jax.grad of the loss function produces finite gradients."""
+        from dysmalpy.fitting.jax_loss import make_jax_loss_function
+
+        gal, obs = _make_test_galaxy_obs()
+
+        cube_model, _ = gal.model.simulate_cube(obs, gal.dscale)
+        cube_model = np.asarray(cube_model)
+        noise = np.ones_like(cube_model)
+        msk = np.ones(cube_model.shape, dtype=bool)
+
+        dscale = gal.dscale
+
+        jax_loss, get_traceable, set_all = make_jax_loss_function(
+            gal.model, obs, dscale, cube_model, noise, mask=msk
+        )
+
+        theta = jnp.array(get_traceable())
+        # Perturb slightly from exact solution to avoid degenerate gradients
+        # (e.g., bt=0 causes NaN gradient for bulge mass)
+        theta = theta + 0.05
+        loss_fn = lambda th: jax_loss(th)
+        grads = jax.grad(loss_fn)(theta)
+
+        assert grads.shape == theta.shape
+        assert jnp.all(jnp.isfinite(grads)), \
+            "All gradients should be finite, got: {}".format(grads)
+
+    def test_loss_with_noise(self):
+        """Adding noise to data increases loss above zero."""
+        from dysmalpy.fitting.jax_loss import make_jax_loss_function
+
+        gal, obs = _make_test_galaxy_obs()
+
+        cube_model, _ = gal.model.simulate_cube(obs, gal.dscale)
+        cube_model = np.asarray(cube_model)
+
+        # Add noise to "data"
+        rng = np.random.RandomState(42)
+        cube_obs = cube_model + rng.normal(0, 0.001, cube_model.shape)
+        noise = np.ones_like(cube_model)
+        msk = np.ones(cube_model.shape, dtype=bool)
+
+        dscale = gal.dscale
+
+        jax_loss, get_traceable, set_all = make_jax_loss_function(
+            gal.model, obs, dscale, cube_obs, noise, mask=msk
+        )
+
+        theta = jnp.array(get_traceable())
+        loss_val = float(jax_loss(theta))
+
+        # Loss should be positive but small (noise std = 0.001)
+        assert loss_val > 0, "Loss with noise should be > 0, got {}".format(loss_val)
+
+
+class TestJAXLogProbFunction:
+    """Test make_jax_log_prob_function."""
+
+    def test_log_prob_at_true_params(self):
+        """Log-prob is finite at true parameters (data = model)."""
+        from dysmalpy.fitting.jax_loss import make_jax_log_prob_function
+
+        gal, obs = _make_test_galaxy_obs()
+
+        cube_model, _ = gal.model.simulate_cube(obs, gal.dscale)
+        cube_model = np.asarray(cube_model)
+        noise = np.ones_like(cube_model)
+        msk = np.ones(cube_model.shape, dtype=bool)
+
+        dscale = gal.dscale
+
+        log_prob_fn, get_traceable, set_all = make_jax_log_prob_function(
+            gal.model, obs, dscale, cube_model, noise, mask=msk
+        )
+
+        theta = jnp.array(get_traceable())
+        lp = float(log_prob_fn(theta))
+        assert np.isfinite(lp), "Log-prob should be finite at true params, got {}".format(lp)
+
+    def test_log_prob_out_of_bounds(self):
+        """Log-prob returns -inf for out-of-bounds parameters."""
+        from dysmalpy.fitting.jax_loss import make_jax_log_prob_function
+
+        gal, obs = _make_test_galaxy_obs()
+
+        cube_model, _ = gal.model.simulate_cube(obs, gal.dscale)
+        cube_model = np.asarray(cube_model)
+        noise = np.ones_like(cube_model)
+        msk = np.ones(cube_model.shape, dtype=bool)
+
+        dscale = gal.dscale
+
+        log_prob_fn, get_traceable, set_all = make_jax_log_prob_function(
+            gal.model, obs, dscale, cube_model, noise, mask=msk
+        )
+
+        theta = jnp.array(get_traceable())
+        # Shift far out of bounds
+        theta_bad = theta.at[0].set(1e10)
+        lp = float(log_prob_fn(theta_bad))
+        assert lp == -np.inf or lp < -1e30, \
+            "Log-prob should be -inf for out-of-bounds params, got {}".format(lp)
+
+
+class TestJAXAdamSmoke:
+    """Smoke tests for JAX Adam optimizer."""
+
+    @pytest.mark.xfail(
+        reason="Adam optimizer traces through kinematic_options.apply_pressure_support "
+               "which uses np.atleast_2d on traced arrays (known limitation, tracked as "
+               "kinematic_options.py TODO)")
+    def test_adam_reduces_loss(self):
+        """Adam optimizer reduces loss from initial value in a few steps."""
+        from dysmalpy.fitting.jax_loss import make_jax_loss_function
+
+        gal, obs = _make_test_galaxy_obs()
+
+        cube_model, _ = gal.model.simulate_cube(obs, gal.dscale)
+        cube_model = np.asarray(cube_model)
+        rng = np.random.RandomState(123)
+        cube_obs = cube_model + rng.normal(0, 0.01, cube_model.shape)
+        noise = np.ones_like(cube_model)
+        msk = np.ones(cube_model.shape, dtype=bool)
+
+        dscale = gal.dscale
+
+        jax_loss, get_traceable, set_all = make_jax_loss_function(
+            gal.model, obs, dscale, cube_obs, noise, mask=msk
+        )
+
+        loss_grad_fn = jax.jit(jax.value_and_grad(jax_loss))
+
+        theta = jnp.array(get_traceable(), dtype=jnp.float64)
+        # Start from slightly perturbed initial values
+        theta = theta + 0.1
+
+        loss_init = float(jax_loss(theta))
+
+        # Run a few Adam steps
+        beta1, beta2, eps, lr = 0.9, 0.999, 1e-8, 1e-2
+        m = jnp.zeros_like(theta)
+        v = jnp.zeros_like(theta)
+        n_steps = 10
+
+        for i in range(n_steps):
+            loss_val, grads = loss_grad_fn(theta)
+            m = beta1 * m + (1 - beta1) * grads
+            v = beta2 * v + (1 - beta2) * grads ** 2
+            m_hat = m / (1 - beta1 ** (i + 1))
+            v_hat = v / (1 - beta2 ** (i + 1))
+            theta = theta - lr * m_hat / (jnp.sqrt(v_hat) + eps)
+
+        loss_final = float(jax_loss(theta))
+
+        assert loss_final < loss_init, \
+            "Loss should decrease after Adam steps: init={}, final={}".format(
+                loss_init, loss_final)

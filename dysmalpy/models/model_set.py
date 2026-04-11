@@ -591,6 +591,28 @@ class ModelSet:
         pfree, pfree_keys = self._get_free_parameters()
         return pfree
 
+    def get_param_storage_names(self):
+        """
+        Return ordered mapping of (comp_name, param_name) -> theta_index
+        for all free parameters.
+
+        Used by JAX loss function factory to inject tracers into parameter
+        storage attributes (``_param_value_<name>``).
+
+        Returns
+        -------
+        dict
+            Keys are ``(comp_name, param_name)`` tuples, values are the
+            corresponding index into the free-parameter ``theta`` vector.
+        """
+        pfree_keys = self.get_free_parameter_keys()
+        result = {}
+        for cmp_name in pfree_keys:
+            for param_name, idx in pfree_keys[cmp_name].items():
+                if idx >= 0:
+                    result[(cmp_name, param_name)] = idx
+        return result
+
     def get_free_parameter_keys(self):
         """
         Return the index within an array of each free parameter
@@ -1340,7 +1362,7 @@ class ModelSet:
             line_center_conv = self.line_center.to(spec_unit).value
             vx = (spec - line_center_conv) / line_center_conv * c_km_s
 
-        cube_final = np.zeros((nspec, ny_sky_samp, nx_sky_samp))
+        cube_final = jnp.zeros((nspec, ny_sky_samp, nx_sky_samp))
 
 
         # First construct the cube based on mass components
@@ -1460,7 +1482,7 @@ class ModelSet:
 
 
             # Calculate "flux" for each position
-            flux_mass = np.zeros(rgal.shape)
+            flux_mass = jnp.zeros(rgal.shape)
 
             # self.light_components SHOULD NOT include
             #    higher-order kin comps with own light profiles.
@@ -1499,14 +1521,14 @@ class ModelSet:
                     ai = _make_cube_ai(self, xgal, ygal, zgal, n_wholepix_z_min=n_wholepix_z_min,
                         pixscale=pixscale_samp, oversample=oversample,
                         dscale=dscale, maxr=maxr/2., maxr_y=maxr_y/2.)
-                    cube_final += np.asarray(populate_cube_jax_ais(
+                    cube_final += populate_cube_jax_ais(
                         jnp.asarray(flux_mass), jnp.asarray(vobs_mass),
-                        jnp.asarray(sigmar), jnp.asarray(vx), jnp.asarray(ai)))
+                        jnp.asarray(sigmar), jnp.asarray(vx), jnp.asarray(ai))
                 else:
                     # Do complete cube propogation calculation
-                    cube_final += np.asarray(populate_cube_jax(
+                    cube_final += populate_cube_jax(
                         jnp.asarray(flux_mass), jnp.asarray(vobs_mass),
-                        jnp.asarray(sigmar), jnp.asarray(vx)))
+                        jnp.asarray(sigmar), jnp.asarray(vx))
                 # +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
             elif transform_method.lower().strip() == 'rotate':
@@ -1631,9 +1653,9 @@ class ModelSet:
                             n_wholepix_z_min=n_wholepix_z_min,
                             pixscale=pixscale_samp, oversample=oversample,
                             dscale=dscale, maxr=maxr/2., maxr_y=maxr_y_final/2.)
-                    cube_final += np.asarray(populate_cube_jax_ais(
+                    cube_final += populate_cube_jax_ais(
                         jnp.asarray(flux_mass_transf), jnp.asarray(vobs_mass_transf),
-                        jnp.asarray(sigmar_transf), jnp.asarray(vx), jnp.asarray(ai_sky)))
+                        jnp.asarray(sigmar_transf), jnp.asarray(vx), jnp.asarray(ai_sky))
 
                 else:
                     # Rotate + transform cube from inclined to sky coordinates
@@ -1713,9 +1735,9 @@ class ModelSet:
                     #######
 
                     # Do complete cube propogation calculation
-                    cube_final += np.asarray(populate_cube_jax(
+                    cube_final += populate_cube_jax(
                         jnp.asarray(flux_mass_transf), jnp.asarray(vobs_mass_transf),
-                        jnp.asarray(sigmar_transf), jnp.asarray(vx)))
+                        jnp.asarray(sigmar_transf), jnp.asarray(vx))
                 # +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
             # Remove the oversample from the geometry xyshift
@@ -1795,9 +1817,9 @@ class ModelSet:
                     # The higher-order term MUST have its own defined dispersion profile:
                     sigma_hiord = comp.dispersion_profile(xhiord*to_kpc, yhiord*to_kpc, zhiord*to_kpc)
 
-                cube_final += np.asarray(populate_cube_jax(
+                cube_final += populate_cube_jax(
                     jnp.asarray(f_hiord), jnp.asarray(v_hiord_LOS),
-                    jnp.asarray(sigma_hiord), jnp.asarray(vx)))
+                    jnp.asarray(sigma_hiord), jnp.asarray(vx))
 
                 # Remove the oversample from the geometry xyshift
                 hiord_geom.xshift = hiord_geom.xshift.value / oversample

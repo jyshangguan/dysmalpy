@@ -311,6 +311,8 @@ class Observation:
 
         # Run simulation for the specific observation
         sim_cube, spec = model.simulate_cube(obs=self, dscale=dscale)
+        sim_cube = np.asarray(sim_cube)
+        spec = np.asarray(spec)
 
 
         # Apply lensing transformation if necessary

@@ -12,8 +12,7 @@ import logging
 
 # Third party imports
 import numpy as np
-
-# Local imports
+import jax.numpy as jnp
 from .base import _DysmalFittable1DModel
 from dysmalpy.parameters import DysmalParameter
 
@@ -65,7 +64,7 @@ class ZHeightGauss(ZHeightProfile):
 
     @staticmethod
     def evaluate(z, sigmaz):
-        return np.exp(-0.5*(z/sigmaz)**2)
+        return jnp.exp(-0.5*(z/sigmaz)**2)
 
     def __call__(self, z):
         return self.evaluate(z, self.sigmaz)
@@ -99,7 +98,7 @@ class ZHeightExp(ZHeightProfile):
 
     @staticmethod
     def evaluate(z, hz):
-        return np.exp(-z/hz)
+        return jnp.exp(-z/hz)
 
     def __call__(self, z):
         return self.evaluate(z, self.hz)

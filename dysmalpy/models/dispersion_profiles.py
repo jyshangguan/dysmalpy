@@ -11,6 +11,7 @@ import logging
 
 # Third party imports
 import numpy as np
+import jax.numpy as jnp
 
 # Local imports
 from .base import _DysmalFittable1DModel
@@ -61,7 +62,7 @@ class DispersionConst(DispersionProfile):
     @staticmethod
     def evaluate(r, sigma0):
         """Dispersion as a function of radius"""
-        return np.ones(r.shape)*sigma0
+        return jnp.ones(r.shape)*sigma0
 
     def __call__(self, r):
         return self.evaluate(r, self.sigma0)

@@ -20,12 +20,16 @@ from .utils import setup_oversampled_chisq
 from .mcmc import MCMCFitter, MCMCResults, _reload_all_fitting_mcmc
 from .nested_sampling import NestedFitter, NestedResults, _reload_all_fitting_nested
 from .mpfit import MPFITFitter, MPFITResults, _reload_all_fitting_mpfit
+from .jax_loss import make_jax_loss_function, make_jax_log_prob_function
+from .jax_optimize import JAXAdamFitter, JAXAdamResults
 
 __all__ = ['MCMCFitter', 'NestedFitter', 'MPFITFitter',
-           'MCMCResults', 'NestedResults', 'MPFITResults',
+           'JAXAdamFitter',
+           'MCMCResults', 'NestedResults', 'MPFITResults', 'JAXAdamResults',
            'reload_all_fitting',
            'chisq_red', 'chisq_eval', 'chisq_red_per_type',
-           'setup_oversampled_chisq']
+           'setup_oversampled_chisq',
+           'make_jax_loss_function', 'make_jax_log_prob_function']
 
 
 # LOGGER SETTINGS

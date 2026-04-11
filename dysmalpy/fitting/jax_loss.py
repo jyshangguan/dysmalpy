@@ -1,0 +1,268 @@
+# coding=utf8
+# Copyright (c) MPE/IR-Submm Group. See LICENSE.rst for license information.
+#
+# JAX-accelerated loss functions for fitting DYSMALPY models.
+#
+# Provides factories that return JIT-compiled callables mapping a parameter
+# vector ``theta`` to a scalar loss (half chi-squared or negative
+# log-posterior).  JAX tracers are injected directly into the model
+# component parameter storage, bypassing the ``float()`` conversion in
+# ``_DysmalModel.__setattr__`` so that the entire computation graph
+# (velocity profile -> cube population -> chi-squared) is traceable.
+
+from __future__ import (absolute_import, division, print_function,
+                        unicode_literals)
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+
+
+__all__ = ['make_jax_loss_function', 'make_jax_log_prob_function']
+
+
+def _storage_name(name):
+    """Return the instance-attribute name used to store *name*'s value."""
+    return '_param_value_{}'.format(name)
+
+
+def _identify_traceable_params(model_set):
+    """Identify free parameters that can be JAX-traced.
+
+    Geometry parameters (inc, pa, xshift, yshift) are excluded because they
+    affect array shapes in grid computation (numpy requires concrete values).
+
+    Parameters
+    ----------
+    model_set : ModelSet
+
+    Returns
+    -------
+    reindexed : list of ((cmp_name, param_name), new_theta_idx)
+        Re-indexed mapping where *new_theta_idx* is contiguous starting from 0.
+    n_traceable : int
+        Number of traceable parameters.
+    orig_theta_indices : list of int
+        The original theta indices corresponding to each entry in *reindexed*.
+    """
+    param_map = model_set.get_param_storage_names()
+
+    # Identify geometry components
+    geom_component_names = set()
+    for cmp_name, comp in model_set.components.items():
+        if getattr(comp, '_type', None) == 'geometry':
+            geom_component_names.add(cmp_name)
+
+    # Filter out geometry params
+    traceable_entries = sorted(
+        [(k, v) for k, v in param_map.items()
+         if k[0] not in geom_component_names],
+        key=lambda x: x[1],
+    )
+
+    reindexed = [(k, new_idx)
+                 for new_idx, (k, _) in enumerate(traceable_entries)]
+    orig_theta_indices = [orig_idx for _, orig_idx in traceable_entries]
+    n_traceable = len(reindexed)
+
+    return reindexed, n_traceable, orig_theta_indices
+
+
+def make_jax_loss_function(model_set, obs, dscale, cube_obs, noise,
+                           mask=None, weight=1.0):
+    """Return a JAX-traceable chi-squared loss function.
+
+    The returned function sets model parameter storage attributes directly
+    to JAX tracer values (bypassing ``update_parameters()``) so that the
+    DysmalParameter descriptors propagate tracers through
+    ``simulate_cube()`` and all downstream operations.
+
+    Parameters
+    ----------
+    model_set : ModelSet
+        The model set whose free parameters define the loss landscape.
+    obs : Observation
+        Observation descriptor (used by ``simulate_cube``).
+    dscale : float
+        Arcsec-to-kpc conversion factor.
+    cube_obs : array-like
+        Observed data cube.
+    noise : array-like
+        Noise cube (same shape as *cube_obs*).
+    mask : array-like or None
+        Boolean mask. Only unmasked pixels contribute to chi-squared.
+    weight : float
+        Observation weight.
+
+    Returns
+    -------
+    callable
+        ``jax_chi2(theta_traceable) -> float``  (half chi-squared, scalar).
+    get_traceable_theta : callable
+        ``get_traceable_theta() -> ndarray`` extracts current traceable
+        parameter values from the model set.
+    set_all_theta : callable
+        ``set_all_theta(theta_full)`` sets all free parameters (including
+        non-traceable geometry params) from a full-length theta vector.
+    """
+    cube_obs_jax = jnp.asarray(cube_obs)
+    noise_jax = jnp.asarray(noise)
+    if mask is not None:
+        mask_jax = jnp.asarray(mask)
+    else:
+        mask_jax = None
+
+    reindexed, n_traceable, orig_theta_indices = _identify_traceable_params(model_set)
+
+    def _inject_tracers(theta_traceable):
+        """Inject JAX tracer values into model parameter storage."""
+        for (cmp_name, param_name), theta_idx in reindexed:
+            comp = model_set.components[cmp_name]
+            sname = _storage_name(param_name)
+            object.__setattr__(comp, sname, theta_traceable[theta_idx])
+
+    def jax_chi2(theta_traceable):
+        _inject_tracers(theta_traceable)
+
+        cube_model, _ = model_set.simulate_cube(obs, dscale)
+
+        if mask_jax is not None:
+            chi_sq = jnp.sum(
+                ((cube_model - cube_obs_jax) / noise_jax) ** 2 * mask_jax
+            )
+        else:
+            chi_sq = jnp.sum(((cube_model - cube_obs_jax) / noise_jax) ** 2)
+
+        return 0.5 * chi_sq * weight
+
+    def get_traceable_theta():
+        """Extract current traceable parameter values as a numpy array."""
+        pfree = model_set.get_free_parameters_values()
+        return np.array([pfree[i] for i in orig_theta_indices])
+
+    def set_all_theta(theta_full):
+        """Set all free parameters from a full-length theta vector."""
+        model_set.update_parameters(theta_full)
+
+    return jax_chi2, get_traceable_theta, set_all_theta
+
+
+def _jax_log_prior(theta_traceable, model_set, reindexed):
+    """Compute log-prior using JAX-traceable operations.
+
+    Supports UniformPrior, UniformLinearPrior, GaussianPrior, and
+    BoundedGaussianPrior.  Returns ``-jnp.inf`` for out-of-bounds parameters.
+    """
+    lp = jnp.array(0.0)
+    for (cmp_name, param_name), theta_idx in reindexed:
+        comp = model_set.components[cmp_name]
+        param = comp._param_instances[param_name]
+        val = theta_traceable[theta_idx]
+        prior = param.prior
+        bounds = param.bounds  # (lo, hi) or (None, None)
+
+        prior_type = type(prior).__name__
+
+        if prior_type == 'UniformPrior':
+            pmin = bounds[0] if bounds[0] is not None else -jnp.inf
+            pmax = bounds[1] if bounds[1] is not None else jnp.inf
+            in_bounds = (val >= pmin) & (val <= pmax)
+            lp += jnp.where(in_bounds, 0.0, -jnp.inf)
+
+        elif prior_type == 'UniformLinearPrior':
+            # Bounds are in linear space; parameter value is log10(linear).
+            # So 10^val should be within bounds.
+            linear_val = jnp.power(10., val)
+            pmin = bounds[0] if bounds[0] is not None else -jnp.inf
+            pmax = bounds[1] if bounds[1] is not None else jnp.inf
+            in_bounds = (linear_val >= pmin) & (linear_val <= pmax)
+            lp += jnp.where(in_bounds, 0.0, -jnp.inf)
+
+        elif prior_type == 'GaussianPrior':
+            mu = prior.center
+            sigma = prior.stddev
+            lp += -0.5 * jnp.log(2.0 * jnp.pi * sigma ** 2) \
+                  - 0.5 * ((val - mu) / sigma) ** 2
+
+        elif prior_type == 'BoundedGaussianPrior':
+            pmin = bounds[0] if bounds[0] is not None else -jnp.inf
+            pmax = bounds[1] if bounds[1] is not None else jnp.inf
+            in_bounds = (val >= pmin) & (val <= pmax)
+            mu = prior.center
+            sigma = prior.stddev
+            gauss_lp = -0.5 * jnp.log(2.0 * jnp.pi * sigma ** 2) \
+                       - 0.5 * ((val - mu) / sigma) ** 2
+            lp += jnp.where(in_bounds, gauss_lp, -jnp.inf)
+
+        else:
+            # Fallback: assume flat prior for unknown types
+            pass
+
+    return lp
+
+
+def make_jax_log_prob_function(model_set, obs, dscale, cube_obs, noise,
+                               mask=None, weight=1.0):
+    """Return a JAX-traceable log-posterior function.
+
+    Parameters
+    ----------
+    model_set : ModelSet
+    obs : Observation
+    dscale : float
+    cube_obs : array-like
+    noise : array-like
+    mask : array-like or None
+    weight : float
+
+    Returns
+    -------
+    log_prob_fn : callable
+        ``log_prob_fn(theta_traceable) -> float``
+    get_traceable_theta : callable
+    set_all_theta : callable
+    """
+    cube_obs_jax = jnp.asarray(cube_obs)
+    noise_jax = jnp.asarray(noise)
+    if mask is not None:
+        mask_jax = jnp.asarray(mask)
+    else:
+        mask_jax = None
+
+    reindexed, n_traceable, orig_theta_indices = _identify_traceable_params(model_set)
+
+    def _inject_tracers(theta_traceable):
+        for (cmp_name, param_name), theta_idx in reindexed:
+            comp = model_set.components[cmp_name]
+            sname = _storage_name(param_name)
+            object.__setattr__(comp, sname, theta_traceable[theta_idx])
+
+    def log_prob_fn(theta_traceable):
+        # Prior
+        lp = _jax_log_prior(theta_traceable, model_set, reindexed)
+
+        # Likelihood (always compute; JAX will optimize away if lp is -inf
+        # via jnp.where at the end)
+        _inject_tracers(theta_traceable)
+        cube_model, _ = model_set.simulate_cube(obs, dscale)
+
+        if mask_jax is not None:
+            chi_sq = jnp.sum(
+                ((cube_model - cube_obs_jax) / noise_jax) ** 2 * mask_jax
+            )
+        else:
+            chi_sq = jnp.sum(((cube_model - cube_obs_jax) / noise_jax) ** 2)
+
+        llike = -0.5 * chi_sq * weight
+        lprob = lp + llike
+
+        return jnp.where(jnp.isfinite(lprob), lprob, -jnp.inf)
+
+    def get_traceable_theta():
+        pfree = model_set.get_free_parameters_values()
+        return np.array([pfree[i] for i in orig_theta_indices])
+
+    def set_all_theta(theta_full):
+        model_set.update_parameters(theta_full)
+
+    return log_prob_fn, get_traceable_theta, set_all_theta
