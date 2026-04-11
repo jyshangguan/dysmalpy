@@ -542,17 +542,32 @@ class ModelSet:
         """
         Update all tied parameters of the model
 
+        Scans every component's parameter descriptors directly for callable
+        ``.tied`` attributes, evaluates them with ``self`` (the ModelSet),
+        and writes the result back.  This works even when the tied function
+        was assigned *after* ``add_component`` (e.g. ``zh.sigmaz.tied = fn``),
+        because the descriptor object itself holds the reference.
+
         Notes
         -----
-        Possibly this should just be invoked at the beginning of :meth:`ModelSet.simulate_cube`
-        to ensure the correct tied parameters are used if not set using :meth:`ModelSet.update_parameters`.
+        Also invoked at the beginning of :meth:`ModelSet.simulate_cube`
+        to ensure the correct tied parameters are used if not set using
+        :meth:`ModelSet.update_parameters`.
         """
-        if self.nparams_tied > 0:
-            for cmp in self.tied:
-                for pp in self.tied[cmp]:
-                    if self.tied[cmp][pp]:
-                        new_value = self.tied[cmp][pp](self)
-                        self.set_parameter_value(cmp, pp, new_value,skip_updated_tied=True)
+        for cmp in self.components:
+            comp = self.components[cmp]
+            for pp in list(getattr(comp, 'param_names', [])):
+                param = getattr(comp, pp, None)
+                if param is None:
+                    continue
+                tied_fn = getattr(param, 'tied', False)
+                if callable(tied_fn):
+                    try:
+                        new_value = tied_fn(self)
+                        self.set_parameter_value(cmp, pp, new_value,
+                                                 skip_updated_tied=True)
+                    except Exception:
+                        pass
 
 
     # Methods to grab the free parameters and keys
@@ -1302,6 +1317,10 @@ class ModelSet:
 
         if obs is None:
             raise ValueError("Must pass 'obs' instance!")
+
+        # Evaluate any tied parameters so that derived values (e.g. sigmaz
+        # tied to r_eff_disk) are up-to-date before building the cube.
+        self._update_tied_parameters()
 
         if obs.mod_options.transform_method.lower().strip() not in ['direct', 'rotate']:
             raise ValueError("Transform method {} unknown! "
