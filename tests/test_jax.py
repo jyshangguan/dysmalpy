@@ -798,9 +798,8 @@ class TestJAXAdamSmoke:
     """Smoke tests for JAX Adam optimizer."""
 
     @pytest.mark.xfail(
-        reason="Adam optimizer traces through kinematic_options.apply_pressure_support "
-               "which uses np.atleast_2d on traced arrays (known limitation, tracked as "
-               "kinematic_options.py TODO)")
+        reason="Adam optimizer traces through _make_cube_ai which uses "
+               "np.vstack on JAX arrays (separate issue from kinematic_options.py)")
     def test_adam_reduces_loss(self):
         """Adam optimizer reduces loss from initial value in a few steps."""
         from dysmalpy.fitting.jax_loss import make_jax_loss_function

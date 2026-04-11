@@ -11,13 +11,12 @@ import logging
 
 # Third party imports
 import numpy as np
+import jax
 import jax.numpy as jnp
-import scipy.special as scp_spec
-import scipy.interpolate as scp_interp
-import scipy.optimize as scp_opt
 
 # Local imports
 from .baryons import DiskBulge, LinearDiskBulge, Sersic, ExpDisk
+from dysmalpy.special import gammaincinv
 
 __all__ = ['KinematicOptions']
 
@@ -29,6 +28,171 @@ logger.setLevel(logging.INFO)
 
 import warnings
 warnings.filterwarnings("ignore")
+
+
+# ------------------------------------------------------------------
+# Helper: JAX-compatible 1D linear interpolation with extrapolation
+# ------------------------------------------------------------------
+def _interp1d_extrap(x, xp, fp):
+    """JAX-traceable 1D linear interpolation with linear extrapolation.
+
+    Parameters
+    ----------
+    x : array_like
+        Query points.
+    xp : array_like
+        1-D sequence of x-coordinates (must be strictly increasing).
+    fp : array_like
+        1-D sequence of y-coordinates, same length as xp.
+
+    Returns
+    -------
+    array_like
+        Interpolated values, with linear extrapolation outside xp range.
+    """
+    # jnp.interp clips to [xp[0], xp[-1]]; we add manual extrapolation.
+    result = jnp.interp(x, xp, fp)
+
+    # Left extrapolation: x < xp[0]
+    left_slope = (fp[1] - fp[0]) / (xp[1] - xp[0])
+    left_extrap = fp[0] + left_slope * (x - xp[0])
+    result = jnp.where(x < xp[0], left_extrap, result)
+
+    # Right extrapolation: x > xp[-1]
+    right_slope = (fp[-1] - fp[-2]) / (xp[-1] - xp[-2])
+    right_extrap = fp[-1] + right_slope * (x - xp[-1])
+    result = jnp.where(x > xp[-1], right_extrap, result)
+
+    return result
+
+
+# ------------------------------------------------------------------
+# Helper functions for adiabatic contraction solver
+# ------------------------------------------------------------------
+def _adiabatic_sq(rprime, r_adi, adia_v_dm_sq, adia_x_dm, adia_v_disk_sq):
+    """Residual function for adiabatic contraction (velocity-squared form).
+
+    Parameters
+    ----------
+    rprime : float
+        Contracted radius guess.
+    r_adi : float
+        Original radius.
+    adia_v_dm_sq : array_like
+        DM halo circular velocity *squared* curve in (km/s)^2.
+    adia_x_dm : array_like
+        DM halo radius array.
+    adia_v_disk_sq : float
+        Baryonic disk circular velocity squared at *r_adi* in (km/s)^2.
+
+    Returns
+    -------
+    float
+        Residual of the adiabatic contraction equation.
+    """
+    rprime = jnp.maximum(rprime, adia_x_dm[1])
+    rprime = jnp.maximum(rprime, 0.1)
+    vhalo_at_rprime = jnp.sqrt(_interp1d_extrap(rprime, adia_x_dm, adia_v_dm_sq))
+    result = (r_adi + r_adi * ((r_adi * adia_v_disk_sq) /
+                               (rprime * (vhalo_at_rprime) ** 2)) - rprime)
+    return result
+
+
+def _adiabatic(rprime, r_adi, adia_v_dm, adia_x_dm, adia_v_disk):
+    """Residual function for adiabatic contraction (velocity form).
+
+    Parameters
+    ----------
+    rprime : float
+        Contracted radius guess (the variable being solved for).
+    r_adi : float
+        Original radius.
+    adia_v_dm : array_like
+        DM halo circular velocity curve.
+    adia_x_dm : array_like
+        DM halo radius array.
+    adia_v_disk : float
+        Baryonic disk circular velocity at *r_adi*.
+
+    Returns
+    -------
+    float
+        Residual of the adiabatic contraction equation.
+    """
+    rprime = jnp.maximum(rprime, adia_x_dm[1])
+    rprime = jnp.maximum(rprime, 0.1)
+    vhalo_at_rprime = _interp1d_extrap(rprime, adia_x_dm, adia_v_dm)
+    result = (r_adi + r_adi * ((r_adi * adia_v_disk ** 2) /
+                               (rprime * (vhalo_at_rprime) ** 2)) - rprime)
+    return result
+
+
+# ------------------------------------------------------------------
+# JAX-compatible secant solver for adiabatic contraction
+# ------------------------------------------------------------------
+def _adiabatic_sq_residual(rprime, r_adi, vhalo_sq_arr, r1d_arr, v_disk_sq):
+    """Residual function for adiabatic contraction (velocity-squared form).
+
+    Matches scipy behavior: interpolate sqrt(vhalo_sq) (i.e., v_halo), then
+    square, to get consistent extrapolation.
+
+    f(r') = r + r*(r*v_disk^2 / (r' * v_halo(r')^2)) - r'
+    """
+    vhalo_at_rp = _interp1d_extrap(rprime, r1d_arr, jnp.sqrt(vhalo_sq_arr))
+    return r_adi + r_adi * (r_adi * v_disk_sq) / (jnp.maximum(rprime, 1e-10) * vhalo_at_rp ** 2) - rprime
+
+
+def _solve_adiabatic_sq(r1d, vhalo1d_sq, vbaryon1d_sq, n_iter=50):
+    """Solve the adiabatic contraction equation for all r1d using
+    the secant method via jax.lax.scan.
+
+    The equation is:
+        f(r') = r + r*(r*v_disk^2 / (r' * v_halo(r')^2)) - r' = 0
+
+    Parameters
+    ----------
+    r1d : array (N,)
+        Original radii in kpc.
+    vhalo1d_sq : array (N,)
+        DM halo v^2 on the 1D radius grid.
+    vbaryon1d_sq : array (N,)
+        Baryonic v^2 on the 1D radius grid.
+    n_iter : int
+        Maximum number of iterations.
+
+    Returns
+    -------
+    rprime_all : array (N,)
+        Contracted radii.
+    """
+    r1d_f = jnp.asarray(r1d, dtype=jnp.float64)
+    vhalo1d_sq_f = jnp.asarray(vhalo1d_sq, dtype=jnp.float64)
+    vbaryon1d_sq_f = jnp.asarray(vbaryon1d_sq, dtype=jnp.float64)
+
+    # Two initial guesses for secant method
+    rp0 = r1d_f + 1.0
+    rp1 = r1d_f + 1.5
+
+    def _step(carry, _):
+        rp_prev, rp_curr = carry
+        f_prev = _adiabatic_sq_residual(rp_prev, r1d_f, vhalo1d_sq_f, r1d_f, vbaryon1d_sq_f)
+        f_curr = _adiabatic_sq_residual(rp_curr, r1d_f, vhalo1d_sq_f, r1d_f, vbaryon1d_sq_f)
+
+        denom = f_curr - f_prev
+        # Secant update: r'_{n+1} = r'_n - f(r'_n) * (r'_n - r'_{n-1}) / (f(r'_n) - f(r'_{n-1}))
+        rp_next = jnp.where(
+            jnp.abs(denom) < 1e-30,
+            rp_curr,
+            rp_curr - f_curr * (rp_curr - rp_prev) / denom
+        )
+        # Keep positive
+        rp_next = jnp.maximum(rp_next, 0.1)
+
+        return (rp_curr, rp_next), None
+
+    (rp_prev, rp_final), _ = jax.lax.scan(_step, (rp0, rp1), None, length=n_iter)
+    return rp_final
+
 
 # ****** Kinematic Options Class **********
 class KinematicOptions:
@@ -160,8 +324,6 @@ class KinematicOptions:
         if self.adiabatic_contract:
 
             # Define 1d radius array for calculation
-            #step1d = 0.2  # kpc
-            # r1d = np.arange(step1d, np.ceil(r.max()/step1d)*step1d+ step1d, step1d, dtype=np.float64)
             try:
                 rmaxin = r.max()
             except:
@@ -172,17 +334,15 @@ class KinematicOptions:
             except:
                 r_ap = 0.
 
-            rmax_calc = max(5.* r_ap, rmaxin)
+            rmax_calc = max(5.* r_ap, float(rmaxin))
 
             # Wide enough radius range for full calculation -- out to 5*Reff, at least
             r1d = np.arange(step1d, np.ceil(rmax_calc/step1d)*step1d+ step1d, step1d, dtype=np.float64)
 
 
-            rprime_all_1d = np.zeros(len(r1d))
-
             # Calculate vhalo, vbaryon on this 1D radius array [note r is a 3D array]
-            vhalo1d_sq = r1d * 0.
-            vbaryon1d_sq = r1d * 0.
+            vhalo1d_sq = np.zeros(len(r1d))
+            vbaryon1d_sq = np.zeros(len(r1d))
             for cmp in model.mass_components:
                 if model.mass_components[cmp]:
                     mcomp = model.components[cmp]
@@ -190,9 +350,9 @@ class KinematicOptions:
                     cmpnt_v_sq = mcomp.vcirc_sq(r1d)
 
                     if mcomp._subtype == 'dark_matter':
-                        vhalo1d_sq = vhalo1d_sq + cmpnt_v_sq
+                        vhalo1d_sq = vhalo1d_sq + np.asarray(cmpnt_v_sq)
                     elif mcomp._subtype == 'baryonic':
-                        vbaryon1d_sq = vbaryon1d_sq + cmpnt_v_sq
+                        vbaryon1d_sq = vbaryon1d_sq + np.asarray(cmpnt_v_sq)
                     elif mcomp._subtype == 'combined':
                         raise ValueError('Adiabatic contraction cannot be turned on when'
                                          'using a combined baryonic and halo mass model!')
@@ -202,42 +362,18 @@ class KinematicOptions:
                                         " for {} component. Only 'dark_matter'"
                                         " or 'baryonic' accepted.".format(mcomp._subtype, cmp))
 
-            converged = np.zeros(len(r1d), dtype=bool)
-            for i in range(len(r1d)):
-                try:
-                    result = scp_opt.newton(_adiabatic_sq, r1d[i] + 1.,
-                                        args=(r1d[i], vhalo1d_sq, r1d, vbaryon1d_sq[i]),
-                                        maxiter=200)
-                    converged[i] = True
-                except:
-                    result = r1d[i]
-                    converged[i] = False
+            # Solve adiabatic contraction using JAX-compatible fixed-point iteration
+            rprime_all_1d = _solve_adiabatic_sq(r1d, vhalo1d_sq, vbaryon1d_sq)
 
-                # ------------------------------------------------------------------
-                # HACK TO FIX WEIRD AC: If too weird: toss it...
-                if ('adiabatic_contract_modify_small_values' in self.__dict__.keys()):
-                    if self.adiabatic_contract_modify_small_values:
-                        if ((result < 0.) | (result > 5*max(r1d))):
-                            result = r1d[i]
-                            converged[i] = False
-                # ------------------------------------------------------------------
+            # Clip to 5*max(r1d) to match the original hack behavior
+            rprime_all_1d = jnp.minimum(rprime_all_1d, 5. * r1d.max())
 
-                rprime_all_1d[i] = result
+            # Interpolate vhalo at the contracted radii
+            # Match scipy: interpolate sqrt(vhalo_sq) then use directly (it's already v_halo)
+            vhalo_adi_1d = _interp1d_extrap(rprime_all_1d, r1d, jnp.sqrt(jnp.asarray(vhalo1d_sq)))
 
-            ###########################
-            vhalo_adi_interp_1d = scp_interp.interp1d(r1d, np.sqrt(vhalo1d_sq), fill_value='extrapolate', kind='linear')
-
-            # Just calculations:
-            if converged.sum() < len(r1d):
-                if converged.sum() >= 0.9 *len(r1d):
-                    rprime_all_1d = rprime_all_1d[converged]
-                    r1d = r1d[converged]
-
-            vhalo_adi_1d = vhalo_adi_interp_1d(rprime_all_1d)
-
-            vhalo_adi_interp_map_3d = scp_interp.interp1d(r1d, vhalo_adi_1d, fill_value='extrapolate', kind='linear')
-
-            vhalo_adi = vhalo_adi_interp_map_3d(r)
+            # Map from 1D contracted radii back to 3D input radii
+            vhalo_adi = _interp1d_extrap(r, r1d, vhalo_adi_1d)
 
             vel_sq = vhalo_adi ** 2 + vbaryon_sq
         else:
@@ -385,7 +521,7 @@ class KinematicOptions:
         elif self.pressure_support_type == 2:
             # Modified derivation that takes into account n_disk / n
             pn = self.get_pressure_support_param(model, param='n')
-            bn = scp_spec.gammaincinv(2. * pn, 0.5)
+            bn = gammaincinv(2. * pn, 0.5)
 
             vel_asymm_drift_sq = 2. * (bn/pn) * jnp.power((r/pre), 1./pn) * sigma**2
 
@@ -451,28 +587,3 @@ class KinematicOptions:
             p_val = self.__dict__[paramkey]
 
         return p_val
-
-
-def _adiabatic(rprime, r_adi, adia_v_dm, adia_x_dm, adia_v_disk):
-    if rprime <= 0.:
-        rprime = 0.1
-    if rprime < adia_x_dm[1]:
-        rprime = adia_x_dm[1]
-    rprime_interp = scp_interp.interp1d(adia_x_dm, adia_v_dm,
-                                        fill_value="extrapolate")
-    result = (r_adi + r_adi * ((r_adi*adia_v_disk**2) /
-                               (rprime*(rprime_interp(rprime))**2)) - rprime)
-
-    return result
-
-def _adiabatic_sq(rprime, r_adi, adia_v_dm_sq, adia_x_dm, adia_v_disk_sq):
-    if rprime <= 0.:
-        rprime = 0.1
-    if rprime < adia_x_dm[1]:
-        rprime = adia_x_dm[1]
-    rprime_interp = scp_interp.interp1d(adia_x_dm, np.sqrt(adia_v_dm_sq),
-                                        fill_value="extrapolate")
-    result = (r_adi + r_adi * ((r_adi*adia_v_disk_sq) /
-                               (rprime*(rprime_interp(rprime))**2)) - rprime)
-
-    return result
