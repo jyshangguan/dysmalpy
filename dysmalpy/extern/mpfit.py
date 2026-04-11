@@ -278,7 +278,7 @@ Perform Levenberg-Marquardt least-squares minimization, based on MINPACK-1.
                                    EXAMPLE
 
    import mpfit
-   import numpy.oldnumeric as Numeric
+   # numpy.oldnumeric removed in numpy 2.0 (was unused)
    x = arange(100, float)
    p0 = [5.7, 2.2, 500., 1.5, 2000.]
    y = ( p[0] + p[1]*[x] + p[2]*[x**2] + p[3]*sqrt(x) +
@@ -897,7 +897,7 @@ class mpfit:
         # In the case if the xall is not float or if is float but has less 
         # than 64 bits we do convert it into double
         if xall.dtype.kind != 'f' or xall.dtype.itemsize<=4:
-            xall = xall.astype(numpy.float)
+            xall = xall.astype(numpy.float64)
 
         npar = len(xall)
         self.fnorm  = -1.

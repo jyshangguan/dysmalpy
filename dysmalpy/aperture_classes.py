@@ -71,7 +71,7 @@ class Aperture(object):
 
     def define_aperture_mask(self):
         mask = np.zeros((self.ny, self.nx), dtype=bool)
-        mask[np.int(self.aper_center[1]), np.int(self.aper_center[0])] = True
+        mask[int(self.aper_center[1]), int(self.aper_center[0])] = True
         return mask
 
     def extract_aper_spec(self, spec_arr=None,

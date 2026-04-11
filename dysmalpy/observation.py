@@ -363,8 +363,8 @@ class Observation:
             nx_oversize = sim_cube_obs.shape[2]
             ny_oversize = sim_cube_obs.shape[1]
             sim_cube_final = sim_cube_obs[:,
-                np.int(ny_oversize/2 - ny_sky/2):np.int(ny_oversize/2+ny_sky/2),
-                np.int(nx_oversize/2 - nx_sky/2):np.int(nx_oversize/2+nx_sky/2)]
+                int(ny_oversize/2 - ny_sky/2):int(ny_oversize/2+ny_sky/2),
+                int(nx_oversize/2 - nx_sky/2):int(nx_oversize/2+nx_sky/2)]
 
         else:
             sim_cube_final = sim_cube_obs

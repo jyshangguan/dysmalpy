@@ -20,15 +20,13 @@ from jax.core import ShapedArray
 def _k0_numpy(y_arr):
     """K0 via scipy, handles both scalars and arrays."""
     y_np = np.asarray(y_arr, dtype=np.float64)
-    result = _sp.k0(y_np)
-    return result.astype(np.float32)
+    return _sp.k0(y_np)
 
 
 def _k1_numpy(y_arr):
     """K1 via scipy, handles both scalars and arrays."""
     y_np = np.asarray(y_arr, dtype=np.float64)
-    result = _sp.k1(y_np)
-    return result.astype(np.float32)
+    return _sp.k1(y_np)
 
 
 @jax.custom_jvp
@@ -49,7 +47,7 @@ def bessel_k0(y):
     y_safe = jnp.maximum(y, 1e-30)
     return jax.pure_callback(
         _k0_numpy,
-        ShapedArray(jnp.shape(y_safe), jnp.float32),
+        ShapedArray(jnp.shape(y_safe), jnp.float64),
         y_safe,
     )
 
@@ -84,7 +82,7 @@ def bessel_k1(y):
     y_safe = jnp.maximum(y, 1e-30)
     return jax.pure_callback(
         _k1_numpy,
-        ShapedArray(jnp.shape(y_safe), jnp.float32),
+        ShapedArray(jnp.shape(y_safe), jnp.float64),
         y_safe,
     )
 

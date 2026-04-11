@@ -704,7 +704,7 @@ def gaus_fit_apy_mod_fitter(x, y, flux_guess, mean_guess, stddev_guess, yerr=Non
 def get_cin_cout(shape, asint=False):
 
     if asint:
-        carr = np.zeros(len(shape), dtype=np.int)
+        carr = np.zeros(len(shape), dtype=np.intp)
     else:
         carr = np.zeros(len(shape))
 
@@ -714,7 +714,7 @@ def get_cin_cout(shape, asint=False):
         else:
             ca = 0.5*sh
         if asint:
-            carr[j] = np.int(np.round(ca))
+            carr[j] = int(np.round(ca))
         else:
             carr[j] = ca
 

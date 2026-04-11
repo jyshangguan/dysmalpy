@@ -433,8 +433,8 @@ class Data3D(Data):
             ctype2 = 'DEC--TAN'
 
         else:
-            xref = np.int(cube.shape[2] / 2.)
-            yref = np.int(cube.shape[1] / 2.)
+            xref = int(cube.shape[2] / 2.)
+            yref = int(cube.shape[1] / 2.)
             ctype1 = 'RA---TAN'
             ctype2 = 'DEC--TAN'
 

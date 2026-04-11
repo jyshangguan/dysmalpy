@@ -89,7 +89,7 @@ def _f_boundaries_from_cond(param, modelset, f_cond):
 
     origstepsize = 0.01
     Nsteps_max = 1001
-    Nsteps = np.min([np.int(np.round((pmax_pb-pmin_pb)/origstepsize)), Nsteps_max])
+    Nsteps = np.min([int(np.round((pmax_pb-pmin_pb)/origstepsize)), Nsteps_max])
     stepsize = (pmax_pb-pmin_pb)/(1.*Nsteps)
     parr = np.arange(pmin_pb, pmax_pb+stepsize, stepsize)
     condarr = np.zeros(len(parr), dtype=bool)
