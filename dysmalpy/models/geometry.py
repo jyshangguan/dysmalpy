@@ -11,6 +11,7 @@ import logging
 
 # Third party imports
 import numpy as np
+import jax.numpy as jnp
 import scipy.ndimage as scp_ndi
 
 try:
@@ -94,25 +95,28 @@ class Geometry(_DysmalFittable3DModel):
 
         super(Geometry, self).__init__(**kwargs)
 
+    def __call__(self, x, y, z):
+        """Shortcut for coord_transform with instance parameters."""
+        return self.coord_transform(x, y, z)
 
     @staticmethod
     def evaluate(x, y, z, inc, pa, xshift, yshift, vel_shift):
         """Transform sky coordinates to galaxy/model reference frame"""
-        inc = np.pi / 180. * inc
-        pa = np.pi / 180. * (pa - 90.)
+        inc = jnp.pi / 180. * inc
+        pa = jnp.pi / 180. * (pa - 90.)
 
         # Apply the shifts in the sky system
         xsky = x - xshift
         ysky = y - yshift
         zsky = z
 
-        xtmp = xsky * np.cos(pa) + ysky * np.sin(pa)
-        ytmp = -xsky * np.sin(pa) + ysky * np.cos(pa)
+        xtmp = xsky * jnp.cos(pa) + ysky * jnp.sin(pa)
+        ytmp = -xsky * jnp.sin(pa) + ysky * jnp.cos(pa)
         ztmp = zsky
 
         xgal = xtmp
-        ygal = ytmp * np.cos(inc) - ztmp * np.sin(inc)
-        zgal = ytmp * np.sin(inc) + ztmp * np.cos(inc)
+        ygal = ytmp * jnp.cos(inc) - ztmp * jnp.sin(inc)
+        zgal = ytmp * jnp.sin(inc) + ztmp * jnp.cos(inc)
 
         return xgal, ygal, zgal
 
@@ -134,17 +138,17 @@ class Geometry(_DysmalFittable3DModel):
         if xshift is None:  xshift = self.xshift
         if yshift is None:  yshift = self.yshift
 
-        inc = np.pi / 180. * inc
-        pa = np.pi / 180. * (pa - 90.)
+        inc = jnp.pi / 180. * inc
+        pa = jnp.pi / 180. * (pa - 90.)
 
         # Apply inlincation:
         xtmp =  xgal
-        ytmp =  ygal * np.cos(inc) + zgal * np.sin(inc)
-        ztmp = -ygal * np.sin(inc) + zgal * np.cos(inc)
+        ytmp =  ygal * jnp.cos(inc) + zgal * jnp.sin(inc)
+        ztmp = -ygal * jnp.sin(inc) + zgal * jnp.cos(inc)
 
         # Apply PA + shifts in sky system:
-        xsky = xtmp * np.cos(pa) - ytmp * np.sin(pa) + xshift
-        ysky = xtmp * np.sin(pa) + ytmp * np.cos(pa) + yshift
+        xsky = xtmp * jnp.cos(pa) - ytmp * jnp.sin(pa) + xshift
+        ysky = xtmp * jnp.sin(pa) + ytmp * jnp.cos(pa) + yshift
         zsky = ztmp
 
         return xsky, ysky, zsky
@@ -206,9 +210,9 @@ class Geometry(_DysmalFittable3DModel):
             where zsky is in the direction [0, -sin(i), cos(i)].
         """
         if inc is None:     inc = self.inc
-        inc = np.pi / 180. * inc
+        inc = jnp.pi / 180. * inc
 
-        LOS_unit_vector = [ 0., np.sin(inc), -np.cos(inc) ]
+        LOS_unit_vector = [ 0., jnp.sin(inc), -jnp.cos(inc) ]
 
         return LOS_unit_vector
 

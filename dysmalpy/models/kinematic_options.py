@@ -1,5 +1,5 @@
 # coding=utf8
-# Copyright (c) MPE/IR-Submm Group. See LICENSE.rst for license information. 
+# Copyright (c) MPE/IR-Submm Group. See LICENSE.rst for license information.
 #
 # Kinematic options for DysmalPy
 
@@ -11,6 +11,7 @@ import logging
 
 # Third party imports
 import numpy as np
+import jax.numpy as jnp
 import scipy.special as scp_spec
 import scipy.interpolate as scp_interp
 import scipy.optimize as scp_opt
@@ -251,12 +252,12 @@ class KinematicOptions:
             else:
                 return vel_sq
         else:
-            vel = np.sqrt(vel_sq)
+            vel = jnp.sqrt(vel_sq)
             if compute_dm:
                 if self.adiabatic_contract:
                     return vel, vhalo_adi
                 else:
-                    vhalo = np.sqrt(vhalo_sq)
+                    vhalo = jnp.sqrt(vhalo_sq)
                     return vel, vhalo
             else:
                 return vel
@@ -293,14 +294,10 @@ class KinematicOptions:
             vel_asymm_drift_sq = self.get_asymm_drift_profile(r, model, tracer=tracer)
             vel_squared = vel_sq - vel_asymm_drift_sq
 
-            # if array:
-            try:
-                vel_squared[vel_squared < 0] = 0.
-            except:
-                # if float single value:
-                if vel_squared < 0:
-                    vel_squared = 0.
-            #vel = np.sqrt(vel_squared)
+            # Floor at zero (JAX-compatible)
+            vel_squared = jnp.maximum(vel_squared, 0.)
+        else:
+            vel_squared = vel_sq
 
         return vel_squared
 
@@ -334,14 +331,10 @@ class KinematicOptions:
             vel_asymm_drift_sq = self.get_asymm_drift_profile(r, model, tracer=tracer)
             vel_squared = vel_sq + vel_asymm_drift_sq
 
-            # if array:
-            try:
-                vel_squared[vel_squared < 0] = 0.
-            except:
-                # if float single value:
-                if (vel_squared < 0):
-                    vel_squared = 0.
-            #vel = np.sqrt(vel_squared)
+            # Floor at zero (JAX-compatible)
+            vel_squared = jnp.maximum(vel_squared, 0.)
+        else:
+            vel_squared = vel_sq
 
         return vel_squared
 
@@ -394,7 +387,7 @@ class KinematicOptions:
             pn = self.get_pressure_support_param(model, param='n')
             bn = scp_spec.gammaincinv(2. * pn, 0.5)
 
-            vel_asymm_drift_sq = 2. * (bn/pn) * np.power((r/pre), 1./pn) * sigma**2
+            vel_asymm_drift_sq = 2. * (bn/pn) * jnp.power((r/pre), 1./pn) * sigma**2
 
         elif self.pressure_support_type == 3:
             # Direct calculation from sig0^2 dlnrho/dlnr:

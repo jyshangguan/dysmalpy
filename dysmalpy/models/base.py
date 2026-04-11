@@ -1,5 +1,5 @@
 # coding=utf8
-# Copyright (c) MPE/IR-Submm Group. See LICENSE.rst for license information. 
+# Copyright (c) MPE/IR-Submm Group. See LICENSE.rst for license information.
 #
 # File containing base classes for DysmalPy models
 
@@ -8,13 +8,16 @@ from __future__ import (absolute_import, division, print_function,
 
 # Standard library
 import abc
+import copy
 import logging
+
+from collections import OrderedDict
 
 # Third party imports
 import numpy as np
-from astropy.modeling import Model
-import astropy.constants as apy_con
-import scipy.special as scp_spec
+import jax.numpy as jnp
+
+from jax.scipy.special import erf, gamma, gammainc
 
 # Local imports
 from dysmalpy.parameters import DysmalParameter, UniformPrior
@@ -24,15 +27,26 @@ try:
 except:
    from . import utils
 
+from dysmalpy.special.gammaincinv import gammaincinv
+
 __all__ = ['MassModel', 'LightModel',
-           'HigherOrderKinematicsSeparate', 'HigherOrderKinematicsPerturbation'
-           'v_circular', 'menc_from_vcirc', 'sersic_mr', 'truncate_sersic_mr']
+           'HigherOrderKinematicsSeparate', 'HigherOrderKinematicsPerturbation',
+           'v_circular', 'menc_from_vcirc', 'sersic_mr', 'truncate_sersic_mr',
+           '_I0_gaussring']
 
 
-# CONSTANTS
-G = apy_con.G
-Msun = apy_con.M_sun
-pc = apy_con.pc
+# ---------------------------------------------------------------------------
+# Physical constants
+# ---------------------------------------------------------------------------
+
+# G in pc * Msun^-1 * (km/s)^2
+# Derived from: G.cgs * Msun.cgs / (pc.cgs * 1e13) where pc.cgs is in cm,
+# r is in kpc so r*1000 gives meters, then /1e5 converts cm/s to km/s.
+# Equivalently: astropy G.to('pc / Msun * (km/s)^2').value * 1e-3
+# NOTE: This is NOT the same as G.to('pc/Msun/(km/s)^2') which gives 4.301e-3.
+# The original dysmalpy base.py v_circular uses CGS internally which yields 4.301e-6.
+G_PC_MSUN_KMSQ = 4.30091727003628e-3  # G.to('pc / Msun * (km/s)^2').value
+G_PC_MSUN_KMSQ_EFF = G_PC_MSUN_KMSQ * 1e-3  # Effective constant used in v_circular and enclosed_mass
 
 
 # LOGGER SETTINGS
@@ -41,66 +55,373 @@ logger = logging.getLogger('DysmalPy')
 logger.setLevel(logging.INFO)
 
 
+# ===========================================================================
+# Metaclass: collects DysmalParameter descriptors at class-creation time
+# ===========================================================================
 
+class _DysmalModelMeta(type):
+    """Metaclass that collects DysmalParameter instances from class
+    attributes.
 
-# ***** Mass Component Model Classes ******
-# Base abstract mass model component class
-class _DysmalModel(Model):
+    Every _DysmalModel subclass has ``_params`` -- an OrderedDict mapping
+    parameter names to their class-level DysmalParameter descriptors.
     """
-    Base abstract `dysmalpy` model component class
+
+    def __new__(mcs, name, bases, namespace):
+        # Skip patching the base class itself
+        params = OrderedDict()
+
+        # Collect parameters from parent classes (most-base first so that
+        # subclass parameters override parent ones with the same name).
+        for base in reversed(bases):
+            if hasattr(base, '_params'):
+                params.update(base._params)
+
+        # Collect from this class's own namespace
+        for key, value in list(namespace.items()):
+            if isinstance(value, DysmalParameter):
+                # Ensure the descriptor knows its name
+                if value._name is None:
+                    value._name = key
+                if not value.name:
+                    value.name = key
+                params[key] = value
+
+        namespace['_params'] = params
+        cls = super().__new__(mcs, name, bases, namespace)
+
+        # Also run __set_name__ on any descriptors that were copied from a
+        # parent and still reference the parent name -- this mirrors what
+        # the default type.__new__ does for descriptors defined *directly*
+        # in the namespace.
+        for pname, param in cls._params.items():
+            param.__set_name__(cls, pname)
+
+        return cls
+
+
+# ===========================================================================
+# Standalone helper used by DysmalModel
+# ===========================================================================
+
+def _storage_name(name):
+    """Return the instance-attribute name used to store *name*'s value."""
+    return '_param_value_{}'.format(name)
+
+
+class _ParamProxy:
+    """Proxy returned by ``_DysmalModel.__getattr__`` for parameter access.
+
+    Acts as the parameter value for arithmetic / comparison, but exposes
+    ``.prior``, ``.tied``, ``.fixed``, ``.bounds`` so that existing code
+    like ``model.r_eff.prior = ...`` continues to work.
+    """
+    __slots__ = ('_value', '_param', '_model', '_pname')
+
+    def __init__(self, value, param, model, pname):
+        object.__setattr__(self, '_value', value)
+        object.__setattr__(self, '_param', param)
+        object.__setattr__(self, '_model', model)
+        object.__setattr__(self, '_pname', pname)
+
+    # -- numeric dunder methods (forward to _value) -----------------------
+
+    def __float__(self):
+        return float(self._value)
+
+    def __repr__(self):
+        return repr(self._value)
+
+    def __str__(self):
+        return str(self._value)
+
+    def __eq__(self, other):
+        return self._value == other
+
+    def __ne__(self, other):
+        return self._value != other
+
+    def __lt__(self, other):
+        return self._value < other
+
+    def __le__(self, other):
+        return self._value <= other
+
+    def __gt__(self, other):
+        return self._value > other
+
+    def __ge__(self, other):
+        return self._value >= other
+
+    def __add__(self, other):
+        return self._value + other
+
+    def __radd__(self, other):
+        return other + self._value
+
+    def __sub__(self, other):
+        return self._value - other
+
+    def __rsub__(self, other):
+        return other - self._value
+
+    def __mul__(self, other):
+        return self._value * other
+
+    def __rmul__(self, other):
+        return other * self._value
+
+    def __truediv__(self, other):
+        return self._value / other
+
+    def __rtruediv__(self, other):
+        return other / self._value
+
+    def __pow__(self, other):
+        return self._value ** other
+
+    def __rpow__(self, other):
+        return other ** self._value
+
+    def __neg__(self):
+        return -self._value
+
+    def __pos__(self):
+        return self._value
+
+    def __abs__(self):
+        return abs(self._value)
+
+    def __hash__(self):
+        return hash(float(self._value))
+
+    def __index__(self):
+        return int(self._value)
+
+    def __bool__(self):
+        return bool(self._value)
+
+    # -- JAX / numpy integration -----------------------------------------
+
+    def __jax_array__(self):
+        return jnp.asarray(self._value)
+
+    def __array__(self, dtype=None):
+        return np.asarray(self._value, dtype=dtype)
+
+    # -- constraint attribute access -------------------------------------
+
+    @property
+    def prior(self):
+        return self._param.prior
+
+    @prior.setter
+    def prior(self, value):
+        self._param.prior = value
+
+    @property
+    def fixed(self):
+        return self._param.fixed
+
+    @fixed.setter
+    def fixed(self, value):
+        self._param.fixed = value
+        self._model.fixed[self._pname] = value
+
+    @property
+    def tied(self):
+        return self._param.tied
+
+    @tied.setter
+    def tied(self, value):
+        self._param.tied = value
+        self._model.tied[self._pname] = value
+
+    @property
+    def bounds(self):
+        return self._param.bounds
+
+    @bounds.setter
+    def bounds(self, value):
+        self._param.bounds = value
+        self._model.bounds[self._pname] = value
+
+    @property
+    def value(self):
+        return self._value
+
+    @value.setter
+    def value(self, v):
+        self._param.value = float(v)
+        object.__setattr__(self, '_value', float(v))
+
+
+# ===========================================================================
+# _DysmalModel -- the abstract base for ALL models
+# ===========================================================================
+
+class _DysmalModel(metaclass=_DysmalModelMeta):
+    """
+    Base abstract `dysmalpy` model component class.
+
+    Replaces ``astropy.modeling.Model`` with a lightweight,
+    JAX-compatible implementation.  Parameter management is handled via
+    :class:`~dysmalpy.parameters.DysmalParameter` descriptors
+    collected by the :class:`_DysmalModelMeta` metaclass.
     """
 
     parameter_constraints = DysmalParameter.constraints
 
+    def __init__(self, name=None, **kwargs):
+        self.name = name
+
+        # _params is set on the class by the metaclass.  Build an
+        # instance-level dict of *deep-copied* descriptors so each model
+        # instance owns its own parameter state.
+        self._param_instances = OrderedDict()
+        for pname, param in self._params.items():
+            p = copy.deepcopy(param)
+            p._model = self
+            self._param_instances[pname] = p
+
+        # Ordered tuple of parameter names
+        self.param_names = tuple(self._param_instances.keys())
+
+        # Apply user-supplied keyword values
+        for pname, value in kwargs.items():
+            if pname in self._param_instances:
+                self._param_instances[pname].value = float(value)
+
+        # Build numpy array of current parameter values (host-side, for
+        # optimizer / sampler access -- NOT used inside JAX-traced code).
+        self.parameters = np.array(
+            [self._param_instances[p].value for p in self.param_names]
+        )
+
+        # Constraint dicts (for compatibility with fitting backends)
+        self.fixed = {p: self._param_instances[p].fixed
+                      for p in self.param_names}
+        self.tied = {p: self._param_instances[p].tied
+                     for p in self.param_names}
+        self.bounds = {p: self._param_instances[p].bounds
+                       for p in self.param_names}
+
+        # Register instance-storage attributes so the original class-level
+        # descriptors (which may still be on the class) also see the right
+        # values.  We shadow them with instance attributes.
+        for pname, param in self._param_instances.items():
+            sname = _storage_name(pname)
+            setattr(self, sname, param.value)
+
+    # ------------------------------------------------------------------
+    # Attribute access -- transparent parameter proxy
+    # ------------------------------------------------------------------
+
+    def __getattr__(self, name):
+        # Only intercept non-private names
+        if name.startswith('_'):
+            raise AttributeError(
+                "'{0}' has no attribute '{1}'".format(type(self).__name__, name)
+            )
+        params = self.__dict__.get('_param_instances', {})
+        if name in params:
+            return params[name].value
+        raise AttributeError(
+            "'{0}' has no attribute '{1}'".format(type(self).__name__, name)
+        )
+
+    def __setattr__(self, name, value):
+        # Always allow internal attributes through
+        if (name.startswith('_')
+                or name in ('name', 'parameters', 'param_names',
+                            'fixed', 'tied', 'bounds',
+                            '_param_instances', '_type',
+                            'n_inputs', 'n_outputs',
+                            'linear', 'fit_deriv', 'col_fit_deriv', 'fittable')):
+            super().__setattr__(name, value)
+            return
+
+        params = self.__dict__.get('_param_instances', {})
+        if name in params:
+            params[name].value = float(value)
+            # Keep the numpy array in sync
+            idx = list(params.keys()).index(name)
+            self.parameters[idx] = float(value)
+            # Also update the instance storage that the original descriptor
+            # may reference
+            sname = _storage_name(name)
+            setattr(self, sname, float(value))
+        else:
+            super().__setattr__(name, value)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
     def __setstate__(self, state):
-        # Compatibility hack, to handle the changed galaxy structure
-        #    (properties, not attributes for data[*], instrument)
+        """Compatibility for pickle loading."""
         self.__dict__ = state
 
-        # Compatibility hacks, to handle the changes in astropy.modeling from v3 to v4
-        if '_inputs' not in state.keys():
-            #inputs = ('x', 'y', 'z') or ('x',)
-            if len(state['_input_units_strict'].keys()) == 1:
-                self.__dict__['_inputs'] =  ('x',)
-            elif len(state['_input_units_strict'].keys()) == 3:
-                self.__dict__['_inputs'] =  ('x', 'y', 'z')
-        if '_outputs' not in state.keys():
-            # Should only be the 1D case
-            if len(state['_input_units_strict'].keys()) == 1:
-                self.__dict__['_outputs'] =  ('y',)
+    def set_parameter_value(self, param_name, value):
+        """Set a parameter by name and keep ``self.parameters`` in sync.
 
+        Parameters
+        ----------
+        param_name : str
+        value : float
+        """
+        if param_name not in self._param_instances:
+            raise KeyError(
+                "Parameter '{0}' not found in '{1}'".format(
+                    param_name, type(self).__name__)
+            )
+        self._param_instances[param_name].value = float(value)
+        idx = list(self._param_instances.keys()).index(param_name)
+        self.parameters[idx] = float(value)
+        sname = _storage_name(param_name)
+        setattr(self, sname, float(value))
 
-        if not self.param_names:
-            pass
-        else:
-            if self.param_names[0] not in self.__dict__.keys():
-                # If self.__dict__ doesn't contain param names,
-                #       need to do v3 to v4 migration
-                for pname in self.param_names:
-                    # Fill param with correct values:
-                    param = self.__getattribute__(pname)
-                    start = self._param_metrics[pname]['slice'].start
-                    stop = self._param_metrics[pname]['slice'].stop
-                    param._value = self._parameters[start:stop]
+    def get_parameter_value(self, param_name):
+        """Return the current value of *param_name*.
 
-                    keys_migrate = ['fixed', 'bounds', 'tied', 'prior']
-                    for km in keys_migrate:
-                        param.__dict__['_'+km] = self._constraints[km][pname]
+        Parameters
+        ----------
+        param_name : str
 
-                    # Set size:
-                    self._param_metrics[pname]['size'] = np.size(param._value)
+        Returns
+        -------
+        float
+        """
+        if param_name not in self._param_instances:
+            raise KeyError(
+                "Parameter '{0}' not found in '{1}'".format(
+                    param_name, type(self).__name__)
+            )
+        return self._param_instances[param_name].value
 
-                    # Set param as part of model dict (v4 "standard")
-                    self.__dict__[pname] = param
+    def copy(self):
+        """Return a deep copy of the model instance."""
+        return copy.deepcopy(self)
 
-                if '_model' in param.__dict__.keys():
-                    if param._model is None:
-                        # If param._model exists and is missing,
-                        # Back-set the model for all parameters, after model complete.
-                        for pname in self.param_names:
-                            param = self.__getattribute__(pname)
-                            param._model = self
-                            self.__setattr__(pname, param)
+    def __call__(self, *args, **kwargs):
+        """Shortcut for ``self.evaluate(...)``."""
+        return self.evaluate(*args, **kwargs)
+
+    def evaluate(self, *args, **kwargs):
+        """Evaluate the model.  Must be overridden by subclasses."""
+        raise NotImplementedError(
+            "{0}.evaluate() is not implemented".format(type(self).__name__)
+        )
+
+    def __repr__(self):
+        if self.name is not None:
+            return "<{0}(name={1!r})>".format(type(self).__name__, self.name)
+        return "<{0}>".format(type(self).__name__)
+
+    def __str__(self):
+        if self.name is not None:
+            return "{0}(name={1})".format(type(self).__name__, self.name)
+        return type(self).__name__
 
 
 class _DysmalFittable1DModel(_DysmalModel):
@@ -113,8 +434,6 @@ class _DysmalFittable1DModel(_DysmalModel):
     col_fit_deriv = True
     fittable = True
 
-    # inputs = ('x',)
-    # outputs = ('y',)
     n_inputs = 1
     n_outputs = 1
 
@@ -129,10 +448,10 @@ class _DysmalFittable3DModel(_DysmalModel):
     col_fit_deriv = True
     fittable = True
 
-    # inputs = ('x', 'y', 'z')
     n_inputs = 3
 
 
+# ***** Mass Component Model Classes ******
 
 class MassModel(_DysmalFittable1DModel):
     """
@@ -251,22 +570,15 @@ class MassModel(_DysmalFittable1DModel):
             As this is the base mass model, assumes the velocity direction
             is the phi direction in cylindrical coordinates, (R,phi,z).
         """
-        rgal = np.sqrt(xgal ** 2 + ygal ** 2)
+        rgal = jnp.sqrt(xgal ** 2 + ygal ** 2)
 
-        vhat_y = xgal/rgal
-
-        # Excise rgal=0 values
-        vhat_y = utils.replace_values_by_refarr(vhat_y, rgal, 0., 0.)
+        vhat_y = jnp.where(rgal > 0, xgal / rgal, 0.)
 
         if not _save_memory:
-            vhat_x = -ygal/rgal
-            vhat_z = 0.*zgal
+            vhat_x = jnp.where(rgal > 0, -ygal / rgal, 0.)
+            vhat_z = jnp.zeros_like(zgal)
 
-            # Excise rgal=0 values
-            vhat_x = utils.replace_values_by_refarr(vhat_x, rgal, 0., 0.)
-            vhat_z = utils.replace_values_by_refarr(vhat_z, rgal, 0., 0.)
-
-            vel_dir_unit_vector = np.array([vhat_x, vhat_y, vhat_z])
+            vel_dir_unit_vector = jnp.array([vhat_x, vhat_y, vhat_z])
         else:
             # Only calculate y values
             vel_dir_unit_vector = [0., vhat_y, 0.]
@@ -278,7 +590,7 @@ class MassModel(_DysmalFittable1DModel):
         """ Return the relevant velocity -- if not specified, call self.circular_velocity() --
             as a vector in the the reference Cartesian frame coordinates. """
         if vel is None:
-            vel = self.circular_velocity(np.sqrt(xgal**2 + ygal**2))
+            vel = self.circular_velocity(jnp.sqrt(xgal**2 + ygal**2))
 
         vel_hat = self.vel_direction_emitframe(xgal, ygal, zgal, _save_memory=_save_memory)
 
@@ -312,16 +624,31 @@ class _LightMassModel(_DysmalModel):
     Abstract model for mass model that also emits light
     """
 
+    mass_to_light = DysmalParameter(
+        default=1., fixed=True, bounds=(0., 10.)
+    )
+
     def __setstate__(self, state):
         if 'mass_to_light' not in state.keys():
-            state = utils.insert_param_state(state, 'mass_to_light', value=1.,
-                                             fixed=True, tied=False,
-                                             bounds=(0.,10.), prior=UniformPrior)
+            state['mass_to_light'] = DysmalParameter(
+                default=1., fixed=True, bounds=(0., 10.),
+                prior=UniformPrior()
+            )
 
-        super(_LightMassModel, self).__setstate__(state)
+        self.__dict__ = state
 
-
-
+        # Ensure _param_instances is rebuilt if missing
+        if '_param_instances' not in state:
+            self._param_instances = OrderedDict()
+            if hasattr(self, '_params'):
+                for pname, param in self._params.items():
+                    p = copy.deepcopy(param)
+                    p._model = self
+                    self._param_instances[pname] = p
+            self.param_names = tuple(self._param_instances.keys())
+            self.parameters = np.array(
+                [self._param_instances[p].value for p in self.param_names]
+            )
 
 
 class HigherOrderKinematics(_DysmalModel):
@@ -408,6 +735,11 @@ class HigherOrderKinematicsSeparate(HigherOrderKinematics):
     _higher_order_type = 'separate'
     _separate_light_profile = True
 
+    @abc.abstractmethod
+    def light_profile(self, *args, **kwargs):
+        """Evaluate the light distribution associated with this component."""
+        pass
+
 
 class HigherOrderKinematicsPerturbation(HigherOrderKinematics):
     """
@@ -428,7 +760,7 @@ def v_circular(mass_enc, r):
     r"""
     Circular velocity given an enclosed mass and radius
 
-    .. math:: 
+    .. math::
         v(r) = \sqrt{(GM(r)/r)}
 
     Parameters
@@ -444,21 +776,7 @@ def v_circular(mass_enc, r):
     vcirc : float or array
         Circular velocity in km/s as a function of radius
     """
-    vcirc = np.sqrt(G.cgs.value * mass_enc * Msun.cgs.value /
-                    (r * 1000. * pc.cgs.value))
-    vcirc = vcirc/1e5
-
-    # -------------------------
-    # Test for 0:
-    try:
-        if len(r) >= 1:
-            vcirc[np.array(r) == 0.] = 0.
-    except:
-        if r == 0.:
-            vcirc = 0.
-    # -------------------------
-
-    return vcirc
+    return jnp.sqrt(jnp.where(r > 0, G_PC_MSUN_KMSQ_EFF * mass_enc / r, 0.))
 
 
 def menc_from_vcirc(vcirc, r):
@@ -478,9 +796,7 @@ def menc_from_vcirc(vcirc, r):
     menc : float or array
         Enclosed mass in solar units
     """
-    menc = ((vcirc*1e5)**2.*(r*1000.*pc.cgs.value) /
-                  (G.cgs.value * Msun.cgs.value))
-    return menc
+    return vcirc ** 2 * r / G_PC_MSUN_KMSQ_EFF
 
 
 def sersic_mr(r, mass, n, r_eff):
@@ -506,18 +822,21 @@ def sersic_mr(r, mass, n, r_eff):
     mr : float or array
         Surface mass density as a function of `r`
     """
+    bn = gammaincinv(2. * n, 0.5)
 
-    bn = scp_spec.gammaincinv(2. * n, 0.5)
-    alpha = r_eff / (bn ** n)
-    amp = (mass / (2 * np.pi) / alpha ** 2 / n /
-           scp_spec.gamma(2. * n))
-    mr = amp * np.exp(-bn * (r / r_eff) ** (1. / n))
+    two_n = 2.0 * n
+    I0 = (mass * bn ** two_n
+          / (2.0 * jnp.pi * r_eff ** 2 * n * gamma(two_n)))
+
+    x = (r / r_eff) ** (1.0 / n)
+    mr = I0 * jnp.exp(-bn * x)
 
     return mr
 
+
 def truncate_sersic_mr(r, mass, n, r_eff, r_inner, r_outer):
     """
-    Radial surface mass density function for a generic sersic model
+    Radial surface mass density function for a truncated sersic model
 
     Parameters
     ----------
@@ -544,31 +863,23 @@ def truncate_sersic_mr(r, mass, n, r_eff, r_inner, r_outer):
     mr : float or array
         Surface mass density as a function of `r`
     """
-    # Ensure it's an array:
-    if isinstance(r*1., float):
-        rarr = np.array([r])
-    else:
-        rarr = np.array(r)
-    # Ensure all radii are 0. or positive:
-    rarr = np.abs(rarr)
+    mr = sersic_mr(r, mass, n, r_eff)
 
-    mr = sersic_mr(rarr, mass, n, r_eff)
+    mr = jnp.where((r >= r_inner) & (r <= r_outer), mr, 0.)
 
-    wh_out = np.where((rarr < r_inner) | (rarr > r_outer))
-    mr[wh_out] = 0.
+    return mr
 
-    if (len(rarr) > 1):
-        return mr
-    else:
-        if isinstance(r*1., float):
-            # Float input
-            return mr[0]
-        else:
-            # Length 1 array input
-            return mr
 
 def _I0_gaussring(r_peak, sigma_r, L_tot):
-    x = r_peak / (sigma_r * np.sqrt(2.))
-    Ih = np.sqrt(np.pi)*x*(1.+scp_spec.erf(x)) + np.exp(-x**2)
-    I0 = L_tot / (2.*np.pi*(sigma_r**2)*Ih)
+    """
+    Normalisation constant for a Gaussian-ring intensity profile.
+
+    I(r) = I0 * exp(-(r - r_peak)^2 / (2 * sigma_r^2))
+
+    I0 = L_tot / (2*pi*sigma_r^2 * Ih)
+    where Ih = sqrt(pi)*x*(1 + erf(x)) + exp(-x^2), x = r_peak/(sigma_r*sqrt(2))
+    """
+    x = r_peak / (sigma_r * jnp.sqrt(2.0))
+    Ih = jnp.sqrt(jnp.pi) * x * (1.0 + erf(x)) + jnp.exp(-x ** 2)
+    I0 = L_tot / (2.0 * jnp.pi * sigma_r ** 2 * Ih)
     return I0

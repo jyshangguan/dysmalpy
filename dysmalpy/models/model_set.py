@@ -25,10 +25,10 @@ except:
 
 # Third party imports
 import numpy as np
-import astropy.constants as apy_con
 import astropy.units as u
-import pyximport; pyximport.install()
-from . import cutils
+import jax.numpy as jnp
+
+from .cube_processing import populate_cube_jax, populate_cube_jax_ais
 
 
 __all__ = ['ModelSet']
@@ -778,7 +778,8 @@ class ModelSet:
                             cmpnt_rhogas = mcomp.rhogas(r)
                             cmpnt_dlnrhogas_dlnr = mcomp.dlnrhogas_dlnr(r)
 
-                            whfin = np.where(np.isfinite(cmpnt_dlnrhogas_dlnr))[0]
+                            cmpnt_dlnrhogas_dlnr_arr = jnp.atleast_1d(cmpnt_dlnrhogas_dlnr)
+                            whfin = np.where(np.isfinite(cmpnt_dlnrhogas_dlnr_arr))[0]
                             try:
                                 if len(whfin) < len(r):
                                     raise ValueError
@@ -982,8 +983,8 @@ class ModelSet:
             raise AttributeError("There are no mass components so a velocity "
                                  "can't be calculated.")
         else:
-            vdm_sq = r*0.
-            vbaryon_sq = r*0.
+            vdm_sq = jnp.zeros_like(r)
+            vbaryon_sq = jnp.zeros_like(r)
 
             for cmp in self.mass_components:
 
@@ -1056,12 +1057,12 @@ class ModelSet:
             vcirc_sq = vels_sq[0]
             vdm_sq = vels_sq[1]
 
-            vdm = np.sqrt(vdm_sq)
+            vdm = jnp.sqrt(vdm_sq)
         else:
             vcirc_sq = vels_sq
 
         vel_sq = self.kinematic_options.apply_pressure_support(r, self, vcirc_sq, tracer=tracer)
-        vel = np.sqrt(vel_sq)
+        vel = jnp.sqrt(vel_sq)
 
         if compute_dm:
             return vel, vdm
@@ -1262,8 +1263,6 @@ class ModelSet:
 
         """
 
-        # from . import cutils
-
         if obs is None:
             raise ValueError("Must pass 'obs' instance!")
 
@@ -1330,15 +1329,16 @@ class ModelSet:
 
         # Setup the final IFU cube
         spec = np.arange(nspec) * spec_step + spec_start
+        # Speed of light in km/s
+        c_km_s = 299792.458
         if spec_type == 'velocity':
-            vx = (spec * spec_unit).to(u.km / u.s).value
+            vx = spec  # already in km/s
         elif spec_type == 'wavelength':
             if self.line_center is None:
                 raise ValueError("line_center must be provided if spec_type is "
                                  "'wavelength.'")
             line_center_conv = self.line_center.to(spec_unit).value
-            vx = (spec - line_center_conv) / line_center_conv * apy_con.c.to(
-                u.km / u.s).value
+            vx = (spec - line_center_conv) / line_center_conv * c_km_s
 
         cube_final = np.zeros((nspec, ny_sky_samp, nx_sky_samp))
 
@@ -1369,7 +1369,7 @@ class ModelSet:
 
 
             # The circular velocity at each position only depends on the radius
-            rgal = np.sqrt(xgal ** 2 + ygal ** 2)
+            rgal = jnp.sqrt(xgal ** 2 + ygal ** 2)
 
             vrot = self.velocity_profile(rgal*to_kpc, tracer=obs.tracer)
             # L.O.S. velocity is then just vrot*sin(i)*cos(theta) where theta
@@ -1395,7 +1395,7 @@ class ModelSet:
                 LOS_hat = geom.LOS_direction_emitframe()
                 vobs_mass = v_sys + vrot * xgal/rgal * LOS_hat[1]
                 # Excise rgal=0 values
-                vobs_mass = model_utils.replace_values_by_refarr(vobs_mass, rgal, 0., v_sys)
+                vobs_mass = jnp.where(rgal > 0, vobs_mass, v_sys)
                 #########################
 
                 #######
@@ -1499,10 +1499,14 @@ class ModelSet:
                     ai = _make_cube_ai(self, xgal, ygal, zgal, n_wholepix_z_min=n_wholepix_z_min,
                         pixscale=pixscale_samp, oversample=oversample,
                         dscale=dscale, maxr=maxr/2., maxr_y=maxr_y/2.)
-                    cube_final += cutils.populate_cube_ais(flux_mass, vobs_mass, sigmar, vx, ai)
+                    cube_final += np.asarray(populate_cube_jax_ais(
+                        jnp.asarray(flux_mass), jnp.asarray(vobs_mass),
+                        jnp.asarray(sigmar), jnp.asarray(vx), jnp.asarray(ai)))
                 else:
                     # Do complete cube propogation calculation
-                    cube_final += cutils.populate_cube(flux_mass, vobs_mass, sigmar, vx)
+                    cube_final += np.asarray(populate_cube_jax(
+                        jnp.asarray(flux_mass), jnp.asarray(vobs_mass),
+                        jnp.asarray(sigmar), jnp.asarray(vx)))
                 # +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
             elif transform_method.lower().strip() == 'rotate':
@@ -1563,7 +1567,7 @@ class ModelSet:
                     LOS_hat = geom.LOS_direction_emitframe()
                     vobs_mass_transf = v_sys + vcirc_mass_transf * xgal_final/rgal_final * LOS_hat[1]
                     # Excise rgal=0 values
-                    vobs_mass_transf = model_utils.replace_values_by_refarr(vobs_mass_transf, rgal_final, 0., v_sys)
+                    vobs_mass_transf = jnp.where(rgal_final > 0, vobs_mass_transf, v_sys)
                     #########################
                     # -----------------------
 
@@ -1627,8 +1631,9 @@ class ModelSet:
                             n_wholepix_z_min=n_wholepix_z_min,
                             pixscale=pixscale_samp, oversample=oversample,
                             dscale=dscale, maxr=maxr/2., maxr_y=maxr_y_final/2.)
-                    cube_final += cutils.populate_cube_ais(flux_mass_transf, vobs_mass_transf,
-                                sigmar_transf, vx, ai_sky)
+                    cube_final += np.asarray(populate_cube_jax_ais(
+                        jnp.asarray(flux_mass_transf), jnp.asarray(vobs_mass_transf),
+                        jnp.asarray(sigmar_transf), jnp.asarray(vx), jnp.asarray(ai_sky)))
 
                 else:
                     # Rotate + transform cube from inclined to sky coordinates
@@ -1649,7 +1654,7 @@ class ModelSet:
                     LOS_hat = geom.LOS_direction_emitframe()
                     vobs_mass_transf = v_sys + vcirc_mass_transf * xgal_final/rgal_final * LOS_hat[1]
                     # Excise rgal=0 values
-                    vobs_mass_transf = model_utils.replace_values_by_refarr(vobs_mass_transf, rgal_final, 0., v_sys)
+                    vobs_mass_transf = jnp.where(rgal_final > 0, vobs_mass_transf, v_sys)
                     #########################
                     # -----------------------
 
@@ -1708,7 +1713,9 @@ class ModelSet:
                     #######
 
                     # Do complete cube propogation calculation
-                    cube_final += cutils.populate_cube(flux_mass_transf, vobs_mass_transf, sigmar_transf, vx)
+                    cube_final += np.asarray(populate_cube_jax(
+                        jnp.asarray(flux_mass_transf), jnp.asarray(vobs_mass_transf),
+                        jnp.asarray(sigmar_transf), jnp.asarray(vx)))
                 # +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
             # Remove the oversample from the geometry xyshift
@@ -1788,7 +1795,9 @@ class ModelSet:
                     # The higher-order term MUST have its own defined dispersion profile:
                     sigma_hiord = comp.dispersion_profile(xhiord*to_kpc, yhiord*to_kpc, zhiord*to_kpc)
 
-                cube_final += cutils.populate_cube(f_hiord, v_hiord_LOS, sigma_hiord, vx)
+                cube_final += np.asarray(populate_cube_jax(
+                    jnp.asarray(f_hiord), jnp.asarray(v_hiord_LOS),
+                    jnp.asarray(sigma_hiord), jnp.asarray(vx)))
 
                 # Remove the oversample from the geometry xyshift
                 hiord_geom.xshift = hiord_geom.xshift.value / oversample

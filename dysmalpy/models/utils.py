@@ -13,6 +13,7 @@ from collections import OrderedDict
 
 # Third party imports
 import numpy as np
+import jax.numpy as jnp
 
 # Local imports
 from dysmalpy.parameters import DysmalParameter
@@ -53,22 +54,16 @@ def get_geom_phi_rad_polar(x, y):
     """
     Calculate polar angle phi from x, y.
     """
-    R = np.sqrt(x ** 2 + y ** 2)
+    R = jnp.sqrt(x ** 2 + y ** 2)
     # Assume ring is in midplane
-    phi_geom_rad = np.arcsin(y/R)
-    sh_x = np.shape(x)
-    if len(sh_x) > 0:
-        # Array-like
-        phi_geom_rad[x < 0] = np.pi - np.arcsin(y[x < 0]/R[x < 0])
-        # Handle position = 0 case:
-        phi_geom_rad[R == 0] = R[R==0] * 0.
-    else:
-        # Float
-        if x < 0.:
-            phi_geom_rad = np.pi - np.arcsin(y/R)
-        elif x == 0.:
-            # Handle position = 0 case:
-            phi_geom_rad = 0.
+    phi_geom_rad = jnp.arcsin(y / R)
+
+    # For x < 0, use pi - arcsin(y/R) instead
+    phi_neg_x = jnp.pi - jnp.arcsin(y / R)
+    phi_geom_rad = jnp.where(x < 0, phi_neg_x, phi_geom_rad)
+
+    # Handle R == 0 case: set phi to 0
+    phi_geom_rad = jnp.where(R == 0, 0., phi_geom_rad)
 
     return phi_geom_rad
 
@@ -78,11 +73,11 @@ def replace_values_by_refarr(arr, ref_arr, excise_val, subs_val):
     by replacing all entries where ref_arr == excise_value with subs_val, or
        arr[ref_arr==excise_val] = subs_val
     """
-    if len(np.shape(ref_arr)) == 0:
+    if len(jnp.shape(ref_arr)) == 0:
         if ref_arr == excise_val:
             arr = subs_val
     else:
-        arr[ref_arr==excise_val] = subs_val
+        arr = jnp.where(ref_arr == excise_val, subs_val, arr)
 
     return arr
 

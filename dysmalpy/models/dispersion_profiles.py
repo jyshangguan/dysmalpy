@@ -62,3 +62,6 @@ class DispersionConst(DispersionProfile):
     def evaluate(r, sigma0):
         """Dispersion as a function of radius"""
         return np.ones(r.shape)*sigma0
+
+    def __call__(self, r):
+        return self.evaluate(r, self.sigma0)

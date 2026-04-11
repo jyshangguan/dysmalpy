@@ -67,6 +67,9 @@ class ZHeightGauss(ZHeightProfile):
     def evaluate(z, sigmaz):
         return np.exp(-0.5*(z/sigmaz)**2)
 
+    def __call__(self, z):
+        return self.evaluate(z, self.sigmaz)
+
     @property
     def z_scalelength(self):
         return self.sigmaz
@@ -97,6 +100,9 @@ class ZHeightExp(ZHeightProfile):
     @staticmethod
     def evaluate(z, hz):
         return np.exp(-z/hz)
+
+    def __call__(self, z):
+        return self.evaluate(z, self.hz)
 
     @property
     def z_scalelength(self):

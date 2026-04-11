@@ -1,5 +1,5 @@
 # coding=utf8
-# Copyright (c) MPE/IR-Submm Group. See LICENSE.rst for license information. 
+# Copyright (c) MPE/IR-Submm Group. See LICENSE.rst for license information.
 #
 # Halo mass models for DysmalPy
 
@@ -13,17 +13,16 @@ import copy
 
 # Third party imports
 import numpy as np
-import scipy.special as scp_spec
 import scipy.optimize as scp_opt
-import astropy.constants as apy_con
-import astropy.units as u
 import astropy.cosmology as apy_cosmo
-
+import jax.numpy as jnp
+import jax.scipy.special
 
 # Local imports
 from .model_set import ModelSet
-from .base import MassModel
+from .base import MassModel, G_PC_MSUN_KMSQ_EFF
 from dysmalpy.parameters import DysmalParameter
+from dysmalpy.special import hyp2f1
 
 __all__ = ['NFW', 'TwoPowerHalo', 'Burkert', 'Einasto', 'DekelZhao', 'LinearNFW']
 
@@ -32,18 +31,7 @@ _default_cosmo = apy_cosmo.FlatLambdaCDM(H0=70., Om0=0.3)
 
 
 # CONSTANTS
-G = apy_con.G
-Msun = apy_con.M_sun
-pc = apy_con.pc
-
-g_pc_per_Msun_kmssq = G.to(u.pc / u.Msun * (u.km / u.s) ** 2).value
-
-# # +++++++++++++++++++++++++++++
-# # TEMP:
-# G = 6.67e-11 * u.m**3 / u.kg / (u.s**2)  #(unit='m3 / (kg s2)')
-# Msun = 2e30 * u.kg
-# pc = 3e16 * u.m
-# # +++++++++++++++++++++++++++++
+g_pc_per_Msun_kmssq = 4.30091727003628e-3  # G.to('pc / Msun * (km/s)^2').value
 
 # LOGGER SETTINGS
 logging.basicConfig(level=logging.INFO)
@@ -180,10 +168,7 @@ class DarkMatterHalo(MassModel):
         radius as the radius where the mean mass density is :math:`200\rho_{\rm crit}`.
         :math:`\rho_{\rm crit}` is the critical density for closure at redshift, :math:`z`.
         """
-        # hz = self.cosmo.H(self.z).value
-        # rvir = ((10 ** self.mvirial * (g_pc_per_Msun_kmssq * 1e-3) /
-        #         (10 * hz * 1e-3) ** 2) ** (1. / 3.))
-        rvir = ((10 ** self.mvirial * (g_pc_per_Msun_kmssq * 1e-3) /
+        rvir = ((10 ** self.mvirial * (G_PC_MSUN_KMSQ_EFF) /
                 (10 * self._hz * 1e-3) ** 2) ** (1. / 3.))
 
         return rvir
@@ -230,43 +215,43 @@ class DarkMatterHalo(MassModel):
         This uses the current value of `fdm` together with
         the input baryon distribution to calculate the inferred `mvirial`.
         """
-        if (self.fdm.value > self.bounds['fdm'][1]) | \
-                ((self.fdm.value < self.bounds['fdm'][0])):
-            mvirial = np.NaN
-        elif (self.fdm.value == 1.):
+        if (self.fdm > self.bounds['fdm'][1]) | \
+                ((self.fdm < self.bounds['fdm'][0])):
+            mvirial = np.nan
+        elif (self.fdm == 1.):
             mvirial = np.inf
-        elif (self.fdm.value == 0.):
+        elif (self.fdm == 0.):
             mvirial = -np.inf #-5.  # as a small but finite value
-        elif (self.fdm.value < 1.e-10):
+        elif (self.fdm < 1.e-10):
             mvirial = -np.inf
         elif (r_fdm < 0.):
-            mvirial = np.NaN
+            mvirial = np.nan
         else:
             if isinstance(baryons, dict):
                 vsqr_bar_re = 0
                 bar_mtot_linear = 0
                 for bcmp in baryons['components']:
                     vsqr_bar_re += bcmp.vcirc_sq(r_fdm)
-                    bar_mtot_linear += 10**bcmp.total_mass.value
+                    bar_mtot_linear += 10**bcmp.total_mass
                 bar_mtot = np.log10(bar_mtot_linear)
             else:
                 vsqr_bar_re = baryons.vcirc_sq(r_fdm)
-                bar_mtot = baryons.total_mass.value
+                bar_mtot = baryons.total_mass
 
-            vsqr_dm_re_target = vsqr_bar_re / (1./self.fdm.value - 1)
+            vsqr_dm_re_target = vsqr_bar_re / (1./self.fdm - 1)
 
             if not np.isfinite(vsqr_dm_re_target):
-                mvirial = np.NaN
+                mvirial = np.nan
             else:
                 #mtest = np.arange(-5, 50, 1.0)
                 short_mtest = False
                 try:
                     if ((bar_mtot >= 8.) & (bar_mtot <=13.)):
                         whminz = np.argmin(np.abs(_dict_lmvir_fac_test_z['zarr']-self.z))
-                        whminfdm = np.argmin(np.abs(_dict_lmvir_fac_test_z['fdmarr']-self.fdm.value))
+                        whminfdm = np.argmin(np.abs(_dict_lmvir_fac_test_z['fdmarr']-self.fdm))
 
                         fac_lmvir = _dict_lmvir_fac_test_z['facarr'][whminz,whminfdm]
-                        rough_mvir = fac_lmvir - np.log10(1./self.fdm.value-1)+np.log10(0.5)+bar_mtot
+                        rough_mvir = fac_lmvir - np.log10(1./self.fdm-1)+np.log10(0.5)+bar_mtot
 
                         mtest = np.arange(rough_mvir-1., rough_mvir+1.5, 0.5)
                         mtest = np.append(-5., mtest)
@@ -288,7 +273,7 @@ class DarkMatterHalo(MassModel):
                     #     b_noAC = mtest[vtest_noAC > 0][0]
                 except:
                     print("adiabatic_contract={}".format(adiabatic_contract))
-                    print("fdm={}".format(self.fdm.value))
+                    print("fdm={}".format(self.fdm))
                     print("r_fdm={}".format(r_fdm))
                     print(mtest, vtest)
                     raise ValueError
@@ -314,7 +299,7 @@ class DarkMatterHalo(MassModel):
                         b = mtest[vtest > 0][0]
                     except:
                         print("adiabatic_contract={}".format(adiabatic_contract))
-                        print("fdm={}".format(self.fdm.value))
+                        print("fdm={}".format(self.fdm))
                         print("r_fdm={}".format(r_fdm))
                         print(mtest, vtest)
                         raise ValueError
@@ -425,10 +410,10 @@ class NFW(DarkMatterHalo):
         rvirial = self.calc_rvir()
         rho0 = self.calc_rho0(rvirial=rvirial)
         rs = rvirial/self.conc
-        aa = 4.*np.pi*rho0*rvirial**3/self.conc**3
+        aa = 4.*jnp.pi*rho0*rvirial**3/self.conc**3
 
         # For very small r, bb can be negative.
-        bb = np.abs(np.log((rs + r)/rs) - r/(rs + r))
+        bb = jnp.abs(jnp.log((rs + r)/rs) - r/(rs + r))
 
         return aa*bb
 
@@ -443,8 +428,8 @@ class NFW(DarkMatterHalo):
         """
         if rvirial is None:
             rvirial = self.calc_rvir()
-        aa = 10**self.mvirial/(4.*np.pi*rvirial**3)*self.conc**3
-        bb = 1./(np.log(1.+self.conc) - (self.conc/(1.+self.conc)))
+        aa = 10**self.mvirial/(4.*jnp.pi*rvirial**3)*self.conc**3
+        bb = 1./(jnp.log(1.+self.conc) - (self.conc/(1.+self.conc)))
 
         return aa * bb
 
@@ -539,8 +524,8 @@ class TwoPowerHalo(DarkMatterHalo):
         rvirial = self.calc_rvir()
         rs = rvirial/self.conc
         aa = 10**self.mvirial*(r/rvirial)**(3 - self.alpha)
-        bb = (scp_spec.hyp2f1(3-self.alpha, self.beta-self.alpha, 4-self.alpha, -r/rs) /
-              scp_spec.hyp2f1(3 - self.alpha, self.beta - self.alpha, 4 - self.alpha, -self.conc))
+        bb = (hyp2f1(3-self.alpha, self.beta-self.alpha, 4-self.alpha, -r/rs) /
+              hyp2f1(3 - self.alpha, self.beta - self.alpha, 4 - self.alpha, -self.conc))
 
         return aa*bb
 
@@ -557,8 +542,8 @@ class TwoPowerHalo(DarkMatterHalo):
             rvirial = self.calc_rvir()
 
         rs = rvirial/self.conc
-        aa = -10**self.mvirial/(4*np.pi*self.conc**(3-self.alpha)*rs**3)
-        bb = (self.alpha - 3) / scp_spec.hyp2f1(3-self.alpha, self.beta-self.alpha, 4-self.alpha, -self.conc)
+        aa = -10**self.mvirial/(4*jnp.pi*self.conc**(3-self.alpha)*rs**3)
+        bb = (self.alpha - 3) / hyp2f1(3-self.alpha, self.beta-self.alpha, 4-self.alpha, -self.conc)
 
         return aa*bb
 
@@ -588,9 +573,9 @@ class TwoPowerHalo(DarkMatterHalo):
         This uses the current values of `fdm`, `mvirial`, and `beta` together with
         the input baryon distribution to calculate the necessary value of `alpha`.
         """
-        if (self.fdm.value > self.bounds['fdm'][1]) | \
-                ((self.fdm.value < self.bounds['fdm'][0])):
-            alpha = np.NaN
+        if (self.fdm > self.bounds['fdm'][1]) | \
+                ((self.fdm < self.bounds['fdm'][0])):
+            alpha = np.nan
         else:
             if isinstance(baryons, dict):
                 vsqr_bar_re = 0
@@ -687,8 +672,8 @@ class Burkert(DarkMatterHalo):
         return rho0 / ((1 + r/rB) * (1 + (r/rB)**2))
 
     def I(self, r):
-        Ival = 0.25 * (np.log(r**2 + self.rB**2) + 2.*np.log(r + self.rB)
-                       - 2.*np.arctan(r/self.rB) - 4.*np.log(self.rB))
+        Ival = 0.25 * (jnp.log(r**2 + self.rB**2) + 2.*jnp.log(r + self.rB)
+                       - 2.*jnp.arctan(r/self.rB) - 4.*jnp.log(self.rB))
         return Ival
 
     def enclosed_mass(self, r):
@@ -724,7 +709,7 @@ class Burkert(DarkMatterHalo):
         rvir = self.calc_rvir()
         Irvir = self.I(rvir)
 
-        aa = 10**self.mvirial / (4*np.pi* self.rB**3)
+        aa = 10**self.mvirial / (4*jnp.pi* self.rB**3)
         bb = 1./Irvir
 
         return aa*bb
@@ -767,9 +752,9 @@ class Burkert(DarkMatterHalo):
         This uses the current values of `fdm`, and `mvirial` together with
         the input baryon distribution to calculate the necessary value of `rB`.
         """
-        if (self.fdm.value > self.bounds['fdm'][1]) | \
-                ((self.fdm.value < self.bounds['fdm'][0])):
-            rB = np.NaN
+        if (self.fdm > self.bounds['fdm'][1]) | \
+                ((self.fdm < self.bounds['fdm'][0])):
+            rB = np.nan
         else:
             if isinstance(baryons, dict):
                 vsqr_bar_re = 0
@@ -902,10 +887,10 @@ class Einasto(DarkMatterHalo):
         rvirial = self.calc_rvir()
         rho0 = self.calc_rho0(rvirial=rvirial)
         rs = rvirial / conc
-        h = rs / np.power(2.*nEinasto, nEinasto)
+        h = rs / jnp.power(2.*nEinasto, nEinasto)
 
         # Return the density at a given radius:
-        return rho0 * np.exp(- np.power(r/h, 1./nEinasto))
+        return rho0 * jnp.exp(- jnp.power(r/h, 1./nEinasto))
 
         # Equivalent to:
         #  rho0 * np.exp( - 2 * nEinasto * ( np.power(r/rs, 1./nEinasto) -1.) )
@@ -928,15 +913,15 @@ class Einasto(DarkMatterHalo):
         """
         rvirial = self.calc_rvir()
         rs = rvirial/self.conc
-        h = rs / np.power(2.*self.nEinasto, self.nEinasto)
+        h = rs / jnp.power(2.*self.nEinasto, self.nEinasto)
 
         rho0 = self.calc_rho0(rvirial=rvirial)
 
         # Explicitly substituted for s = r/h before doing s^(1/nEinasto)
-        incomp_gam =  scp_spec.gammainc(3*self.nEinasto, 2.*self.nEinasto * np.power(r/rs, 1./self.nEinasto) ) \
-                        * scp_spec.gamma(3*self.nEinasto)
+        incomp_gam =  jax.scipy.special.gammainc(3*self.nEinasto, 2.*self.nEinasto * jnp.power(r/rs, 1./self.nEinasto) ) \
+                        * jax.scipy.special.gamma(3*self.nEinasto)
 
-        Menc = 4.*np.pi * rho0 * np.power(h, 3.) * self.nEinasto * incomp_gam
+        Menc = 4.*jnp.pi * rho0 * jnp.power(h, 3.) * self.nEinasto * incomp_gam
 
         return Menc
 
@@ -952,13 +937,13 @@ class Einasto(DarkMatterHalo):
         if rvirial is None:
             rvirial = self.calc_rvir()
         rs = rvirial/self.conc
-        h = rs / np.power(2.*self.nEinasto, self.nEinasto)
+        h = rs / jnp.power(2.*self.nEinasto, self.nEinasto)
 
-        incomp_gam =  scp_spec.gammainc(3*self.nEinasto, (2.*self.nEinasto) * \
-                        np.power(self.conc, 1./self.nEinasto) ) \
-                        * scp_spec.gamma(3*self.nEinasto)
+        incomp_gam =  jax.scipy.special.gammainc(3*self.nEinasto, (2.*self.nEinasto) * \
+                        jnp.power(self.conc, 1./self.nEinasto) ) \
+                        * jax.scipy.special.gamma(3*self.nEinasto)
 
-        rho0 = 10**self.mvirial / (4.*np.pi*self.nEinasto * np.power(h, 3.) * incomp_gam)
+        rho0 = 10**self.mvirial / (4.*jnp.pi*self.nEinasto * jnp.power(h, 3.) * incomp_gam)
 
         return rho0
 
@@ -991,7 +976,7 @@ class Einasto(DarkMatterHalo):
         if np.isfinite(nEinasto):
             return 1./nEinasto
         else:
-            return np.NaN
+            return np.nan
 
     def calc_nEinasto_from_fdm(self, baryons, r_fdm):
         """
@@ -1018,9 +1003,9 @@ class Einasto(DarkMatterHalo):
         the input baryon distribution to calculate the necessary value of `nEinasto`.
         """
 
-        if (self.fdm.value > self.bounds['fdm'][1]) | \
-                ((self.fdm.value < self.bounds['fdm'][0])):
-            nEinasto = np.NaN
+        if (self.fdm > self.bounds['fdm'][1]) | \
+                ((self.fdm < self.bounds['fdm'][0])):
+            nEinasto = np.nan
         else:
 
             # NOTE: have not tested this yet
@@ -1074,7 +1059,7 @@ class Einasto(DarkMatterHalo):
             `nEinastro` given the current value of `alphaEinasto`
 
         """
-        if model_set.components['halo'].alphaEinasto.value != self.alphaEinasto:
+        if model_set.components['halo'].alphaEinasto != self.alphaEinasto:
             raise ValueError
         return 1./self.alphaEinasto
 
@@ -1156,7 +1141,7 @@ class DekelZhao(DarkMatterHalo):
         rc = rvirial / c
         x = r / rc
 
-        return rhoc / (np.power(x, a) * np.power((1.+np.sqrt(x)), 2.*(3.5-a)))
+        return rhoc / (jnp.power(x, a) * jnp.power((1.+jnp.sqrt(x)), 2.*(3.5-a)))
 
     def enclosed_mass(self, r):
         """
@@ -1180,7 +1165,7 @@ class DekelZhao(DarkMatterHalo):
         x = r / rc
         mu = self.calc_mu(a=a, c=c)
 
-        return mu * mvir / (np.power(x, a-3.)*np.power((1.+np.sqrt(x)), 2.*(3.-a)))
+        return mu * mvir / (jnp.power(x, a-3.)*jnp.power((1.+jnp.sqrt(x)), 2.*(3.-a)))
 
     def calc_a_c(self):
         r"""
@@ -1193,8 +1178,8 @@ class DekelZhao(DarkMatterHalo):
         """
         #rvirial = self.calc_rvir()
         #r12 = np.sqrt(0.01*rvirial/rvirial)
-        r12 = np.sqrt(0.01)
-        c12 = np.sqrt(self.c2)
+        r12 = jnp.sqrt(0.01)
+        c12 = jnp.sqrt(self.c2)
         a = (1.5*self.s1 - 2.*(3.5-self.s1)*r12*c12)/(1.5 - (3.5-self.s1)*r12*c12)
         c = ((self.s1-2.)/((3.5-self.s1)*r12 - 1.5/c12))**2
 
@@ -1226,7 +1211,7 @@ class DekelZhao(DarkMatterHalo):
         if rvirial is None:
             rvirial = self.calc_rvir()
 
-        rhovirbar = (3.*mvir)/(4.*np.pi*(rvirial**3))
+        rhovirbar = (3.*mvir)/(4.*jnp.pi*(rvirial**3))
         return rhovirbar
 
     def calc_mu(self, a=None, c=None):
@@ -1236,7 +1221,7 @@ class DekelZhao(DarkMatterHalo):
         if (a is None) or (c is None):
             a, c = self.calc_a_c()
 
-        mu = np.power(c, a-3.) * np.power((1.+np.sqrt(c)), 2.*(3.-a))
+        mu = jnp.power(c, a-3.) * jnp.power((1.+jnp.sqrt(c)), 2.*(3.-a))
         return mu
 
     def _minfunc_vdm_mvir_from_fdm(self, mvirial, vsqtarget, r_fdm, bary, adiabatic_contract):
@@ -1297,7 +1282,7 @@ class LinearNFW(DarkMatterHalo):
         \rho = \frac{\rho_0}{(r/r_s)(1 + r/r_s)^2}
 
     :math:`r_s` is the scale radius defined as :math:`r_{\rm vir}/c`.
-    :math:`\rho_0` is the normalization parameter. 
+    :math:`\rho_0` is the normalization parameter.
 
     References
     ----------
@@ -1337,10 +1322,10 @@ class LinearNFW(DarkMatterHalo):
         rvirial = self.calc_rvir()
         rho0 = self.calc_rho0(rvirial=rvirial)
         rs = rvirial/self.conc
-        aa = 4.*np.pi*rho0*rvirial**3/self.conc**3
+        aa = 4.*jnp.pi*rho0*rvirial**3/self.conc**3
 
         # For very small r, bb can be negative.
-        bb = np.abs(np.log((rs + r)/rs) - r/(rs + r))
+        bb = jnp.abs(jnp.log((rs + r)/rs) - r/(rs + r))
 
         return aa*bb
 
@@ -1353,14 +1338,14 @@ class LinearNFW(DarkMatterHalo):
         rho0 : float
             Mass density normalization in :math:`M_{\odot}/\rm{kpc}^3`
         """
-        
+
         if rvirial is None:
             rvirial = self.calc_rvir()
-        aa = self.mvirial/(4.*np.pi*rvirial**3)*self.conc**3
-        bb = 1./(np.log(1.+self.conc) - (self.conc/(1.+self.conc)))
+        aa = self.mvirial/(4.*jnp.pi*rvirial**3)*self.conc**3
+        bb = 1./(jnp.log(1.+self.conc) - (self.conc/(1.+self.conc)))
 
         return aa * bb
-    
+
     def calc_rvir(self):
         r"""
         Calculate the virial radius based on virial mass and redshift
@@ -1382,10 +1367,7 @@ class LinearNFW(DarkMatterHalo):
         radius as the radius where the mean mass density is :math:`200\rho_{\rm crit}`.
         :math:`\rho_{\rm crit}` is the critical density for closure at redshift, :math:`z`.
         """
-        # hz = self.cosmo.H(self.z).value
-        # rvir = ((self.mvirial * (g_pc_per_Msun_kmssq * 1e-3) /
-        #         (10 * hz * 1e-3) ** 2) ** (1. / 3.))
-        rvir = ((self.mvirial * (g_pc_per_Msun_kmssq * 1e-3) /
+        rvir = ((self.mvirial * (G_PC_MSUN_KMSQ_EFF) /
                 (10 * self._hz * 1e-3) ** 2) ** (1. / 3.))
 
         return rvir

@@ -11,6 +11,7 @@ import logging
 
 # Third party imports
 import numpy as np
+import jax.numpy as jnp
 
 # Local imports
 from .base import LightModel, _DysmalFittable1DModel, _DysmalFittable3DModel, \
@@ -121,6 +122,9 @@ class LightTruncateSersic(LightModel, _DysmalFittable1DModel):
         """
         return truncate_sersic_mr(r, L_tot, n, r_eff, r_inner, r_outer)
 
+    def __call__(self, r):
+        return self.evaluate(r, self.L_tot, self.r_eff, self.n, self.r_inner, self.r_outer)
+
     def light_profile(self, r):
         """
         Conversion from mass to light as a function of radius
@@ -178,7 +182,7 @@ class LightGaussianRing(LightModel, _DysmalFittable1DModel):
         super(LightGaussianRing, self).__init__(**kwargs)
 
     def sigma_R(self):
-        return self.FWHM.value / (2.*np.sqrt(2.*np.log(2.)))
+        return self.FWHM.value / (2.*jnp.sqrt(2.*jnp.log(2.)))
 
     @staticmethod
     def evaluate(r, R_peak, FWHM, L_tot):
@@ -186,9 +190,12 @@ class LightGaussianRing(LightModel, _DysmalFittable1DModel):
         Gaussian ring light surface density.
         Radius r must be in kpc
         """
-        sigma_R = FWHM/ (2.*np.sqrt(2.*np.log(2.)))
+        sigma_R = FWHM / (2. * jnp.sqrt(2. * jnp.log(2.)))
         I0 = _I0_gaussring(R_peak, sigma_R, L_tot)
-        return I0*np.exp(-(r-R_peak)**2/(2.*sigma_R**2))
+        return I0 * jnp.exp(-(r - R_peak)**2 / (2. * sigma_R**2))
+
+    def __call__(self, r):
+        return self.evaluate(r, self.R_peak, self.FWHM, self.L_tot)
 
     def light_profile(self, r):
         """
@@ -272,12 +279,16 @@ class LightClump(LightModel, _DysmalFittable3DModel):
         """
         Light profile of the clump
         """
-        phi_rad = np.pi / 180. * phi
+        phi_rad = jnp.pi / 180. * phi
 
         # INGORE THETA, and assume clump centered at midplane:
-        r = np.sqrt( (x-r_center*np.cos(phi_rad))**2 + \
-                     (y-r_center*np.sin(phi_rad))**2 )
+        r = jnp.sqrt((x - r_center * jnp.cos(phi_rad))**2 +
+                     (y - r_center * jnp.sin(phi_rad))**2)
         return sersic_mr(r, L_tot, n, r_eff)
+
+    def __call__(self, x, y, z):
+        return self.evaluate(x, y, z, self.L_tot, self.r_eff, self.n,
+                             self.r_center, self.phi, self.theta)
 
     def light_profile(self, x, y, z):
         """
@@ -352,7 +363,7 @@ class LightGaussianRingAzimuthal(LightModel, _DysmalFittable3DModel):
         super(LightGaussianRingAzimuthal, self).__init__(**kwargs)
 
     def sigma_R(self):
-        return self.FWHM.value / (2.*np.sqrt(2.*np.log(2.)))
+        return self.FWHM.value / (2.*jnp.sqrt(2.*jnp.log(2.)))
 
     @staticmethod
     def evaluate(x, y, z, R_peak, FWHM, L_tot, phi, contrast, gamma):
@@ -360,20 +371,26 @@ class LightGaussianRingAzimuthal(LightModel, _DysmalFittable3DModel):
         Azimuthally varying Gaussian ring light surface density.
         Positions x,y,z in kpc
         """
-        sigma_R = FWHM / (2.*np.sqrt(2.*np.log(2.)))
+        sigma_R = FWHM / (2. * jnp.sqrt(2. * jnp.log(2.)))
         I0 = _I0_gaussring(R_peak, sigma_R, L_tot)
-        r = np.sqrt( x ** 2 + y ** 2 )
-        gaus_symm = I0*np.exp(-(r-R_peak)**2/(2.*sigma_R**2))
+        r = jnp.sqrt(x**2 + y**2)
+        gaus_symm = I0 * jnp.exp(-(r - R_peak)**2 / (2. * sigma_R**2))
 
         # Assume ring is in midplane
-        phi_rad = phi * np.pi / 180.
-        phi_gal_rad = utils.get_geom_phi_rad_polar(x, y)
+        phi_rad = phi * jnp.pi / 180.
+        # Compute polar angle (replaces utils.get_geom_phi_rad_polar for JAX compatibility)
+        R = jnp.sqrt(x**2 + y**2)
+        phi_gal_rad = jnp.arcsin(jnp.where(R > 0, y / R, 0.))
+        phi_gal_rad = jnp.where(x < 0, jnp.pi - phi_gal_rad, phi_gal_rad)
+        phi_gal_rad = jnp.where(R == 0, 0., phi_gal_rad)
 
+        asymm_fac = (1. - (1. - contrast) * jnp.power(
+            jnp.abs(jnp.sin(0.5 * (phi_gal_rad - phi_rad))), 1. / gamma))
+        return gaus_symm * asymm_fac
 
-        asymm_fac = 1. - (1.-contrast)*np.power(np.abs(np.sin(0.5 * (phi_gal_rad-phi_rad))), 1./gamma)
-        gaus_asymm = gaus_symm * asymm_fac
-
-        return gaus_asymm
+    def __call__(self, x, y, z):
+        return self.evaluate(x, y, z, self.R_peak, self.FWHM, self.L_tot,
+                             self.phi, self.contrast, self.gamma)
 
     def light_profile(self, x, y, z):
         """

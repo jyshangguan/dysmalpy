@@ -16,8 +16,6 @@ import copy
 # Third party
 import numpy as np
 from scipy.stats import norm, truncnorm
-from astropy.modeling import Parameter
-from astropy.units import Quantity
 import six
 
 __all__ = ['DysmalParameter', 'Prior', 'UniformPrior', 'GaussianPrior',
@@ -31,15 +29,14 @@ def _binary_comparison_operation(op):
     def wrapper(self, val):
 
         if self._model is None:
+            # Unbound descriptor -- support ordered protocol for __set_name__
             if op is operator.lt:
-                # Because OrderedDescriptor uses __lt__ to work, we need to
-                # call the super method, but only when not bound to an instance
-                # anyways
-                return super(Parameter, self).__lt__(val)
+                return object.__lt__(self, val)
             else:
                 return NotImplemented
 
         if self.unit is not None:
+            from astropy.units import Quantity  # optional dep
             self_value = Quantity(self.value, self.unit)
         else:
             self_value = self.value
@@ -47,6 +44,11 @@ def _binary_comparison_operation(op):
         return op(self_value, val)
 
     return wrapper
+
+
+def _storage_name(name):
+    """Return the instance-attribute name used to store *name*'s value."""
+    return '_param_value_{}'.format(name)
 
 
 
@@ -926,12 +928,43 @@ class ConditionalEmpiricalUniformPrior(Prior):
 
 
 
-class DysmalParameter(Parameter):
+class DysmalParameter:
     """
-    New parameter class for dysmalpy based on `~astropy.modeling.Parameter`
+    A lightweight, JAX-compatible replacement for
+    ``astropy.modeling.Parameter``.
 
-    The main change is adding a prior as part of the constraints
+    It is a Python **descriptor** with the same constraint model as the
+    original ``DysmalParameter``: ``('fixed', 'tied', 'bounds', 'prior')``.
+
+    Parameters
+    ----------
+    name : str
+        Parameter name.  Normally set automatically by ``__set_name__``.
+    description : str
+        Human-readable description.
+    default : float or None
+        Default value.  If *None* the parameter is initialised to ``0.0``.
+    unit : astropy.units.Unit or None
+        Physical unit associated with the parameter.
+    getter : callable or None
+        Custom getter function ``getter(self)``.
+    setter : callable or None
+        Custom setter function ``setter(self, val)``.
+    fixed : bool
+        If ``True`` the parameter value is held constant during fitting.
+    tied : bool or callable
+        If callable, the parameter value is derived from other parameters
+        via ``tied(model_instance)``.
+    min : float or None
+        Deprecated -- use *bounds*.
+    max : float or None
+        Deprecated -- use *bounds*.
+    bounds : tuple of (float, float) or None
+        ``(lower, upper)`` bounds.  Use ``None`` for an unbounded side.
+    prior : Prior instance or None
+        Prior distribution.  Defaults to :class:`UniformPrior`.
     """
+
     constraints = ('fixed', 'tied', 'bounds', 'prior')
 
     def __init__(self, name='', description='', default=None, unit=None,
@@ -941,25 +974,170 @@ class DysmalParameter(Parameter):
         if prior is None:
             prior = UniformPrior()
 
-        super(DysmalParameter, self).__init__(name=name,
-                                              description=description,
-                                              default=default,
-                                              unit=unit,
-                                              getter=getter,
-                                              setter=setter,
-                                              fixed=fixed,
-                                              tied=tied,
-                                              min=min,
-                                              max=max,
-                                              bounds=bounds)
+        self.name = name
+        self.description = description
+        self.unit = unit
+        self.getter = getter
+        self.setter = setter
+        self.fixed = fixed
+        self.tied = tied
+        self.prior = prior
 
-        try:
-            # Set prior:
-            self.prior = prior
-        except:
-            # Quick backwards compatibility for AstroPy v3:
-            self._prior = prior
+        # Resolve bounds from the various ways they can be specified
+        if bounds is not None:
+            self.bounds = tuple(bounds)
+        elif min is not None or max is not None:
+            self.bounds = (min, max)
+        else:
+            self.bounds = (None, None)
 
+        # Internal default -- used when the owning model instance is first
+        # created and no explicit value has been set yet.
+        if default is None:
+            self._default = 0.0
+        else:
+            self._default = default
+
+        # Will be set by __set_name__ / __get__ when the descriptor is
+        # bound to a model instance.
+        self._model = None
+        self._name = None          # attribute name on the owning class
+
+    # ------------------------------------------------------------------
+    # Descriptor protocol
+    # ------------------------------------------------------------------
+
+    def __set_name__(self, owner, name):
+        """Called automatically when the descriptor is assigned to a class
+        attribute (Python 3.6+)."""
+        self._name = name
+        if not self.name:
+            self.name = name
+
+    def __get__(self, obj, objtype=None):
+        """
+        Return the descriptor itself (for both class and instance access).
+
+        This allows ``model.param_name.prior = ...`` and
+        ``model.param_name.fixed = True`` to work, while the numeric
+        value is available via ``model.param_name.value``.
+        """
+        if obj is None:
+            return self
+
+        # Bind to the owning model instance the first time we see it
+        if self._model is not obj:
+            self._model = obj
+
+        # Initialise the instance storage if it does not exist yet
+        sname = _storage_name(self._name)
+        if not hasattr(obj, sname):
+            setattr(obj, sname, copy.deepcopy(self._default))
+
+        if self.getter is not None:
+            # Custom getter: update our cached value and return self
+            self._default = self.getter(obj)
+            setattr(obj, sname, self._default)
+
+        return self
+
+    def __set__(self, obj, value):
+        """
+        Set the parameter value on the owning model instance.
+
+        If a custom *setter* is defined it receives ``(obj, value)``.
+        Also keeps ``obj.parameters`` (numpy array) in sync.
+        """
+        if self._model is not obj:
+            self._model = obj
+
+        value = float(value)
+
+        if self.setter is not None:
+            self.setter(obj, value)
+        else:
+            setattr(obj, _storage_name(self._name), value)
+
+        # Keep the model's numpy parameter array in sync
+        if hasattr(obj, 'parameters') and hasattr(obj, 'param_names'):
+            try:
+                idx = list(obj.param_names).index(self._name)
+                obj.parameters[idx] = value
+            except (ValueError, AttributeError):
+                pass
+
+    # ------------------------------------------------------------------
+    # .value property
+    # ------------------------------------------------------------------
+
+    @property
+    def value(self):
+        """Return the current parameter value.
+
+        This property works both when the descriptor is bound to a model
+        instance (returns the instance-level value) and when it is unbound
+        (returns the default).
+        """
+        if self._model is not None:
+            sname = _storage_name(self._name)
+            if hasattr(self._model, sname):
+                val = getattr(self._model, sname)
+                if self.getter is not None:
+                    return self.getter(self._model)
+                return val
+            # Storage not yet initialised -- fall through to default
+        return copy.deepcopy(self._default)
+
+    @value.setter
+    def value(self, val):
+        """Set the parameter value."""
+        if self._model is not None:
+            if self.setter is not None:
+                self.setter(self._model, val)
+            else:
+                setattr(self._model, _storage_name(self._name), val)
+        else:
+            # Not yet bound -- update the default so that the first
+            # __get__ on an instance will pick it up.
+            self._default = val
+
+    # ------------------------------------------------------------------
+    # Pickle support
+    # ------------------------------------------------------------------
+
+    def __getstate__(self):
+        return {
+            'name': self.name,
+            'description': self.description,
+            'unit': self.unit,
+            'getter': self.getter,
+            'setter': self.setter,
+            'fixed': self.fixed,
+            'tied': self.tied,
+            'bounds': self.bounds,
+            'prior': self.prior,
+            '_default': self._default,
+            '_model': None,       # transient -- not pickled
+            '_name': self._name,
+        }
+
+    def __setstate__(self, state):
+        self.name = state['name']
+        self.description = state['description']
+        self.unit = state['unit']
+        self.getter = state['getter']
+        self.setter = state['setter']
+        self.fixed = state['fixed']
+        self.tied = state['tied']
+        self.bounds = state['bounds']
+        self.prior = state['prior']
+        self._default = state['_default']
+        self._model = None
+        self._name = state['_name']
+
+    # ------------------------------------------------------------------
+    # Rich comparison operators
+    # ------------------------------------------------------------------
 
     __eq__ = _binary_comparison_operation(operator.eq)
     __ne__ = _binary_comparison_operation(operator.ne)
@@ -967,3 +1145,100 @@ class DysmalParameter(Parameter):
     __gt__ = _binary_comparison_operation(operator.gt)
     __le__ = _binary_comparison_operation(operator.le)
     __ge__ = _binary_comparison_operation(operator.ge)
+
+    # ------------------------------------------------------------------
+    # Representations
+    # ------------------------------------------------------------------
+
+    def __repr__(self):
+        return (
+            "DysmalParameter(name={!r}, value={!r}, default={!r}, "
+            "bounds={!r}, fixed={!r}, prior={!r})"
+            .format(self.name, self.value, self._default,
+                    self.bounds, self.fixed, self.prior)
+        )
+
+    def __str__(self):
+        return ("{}={}".format(self.name, self.value))
+
+    def __hash__(self):
+        return id(self)
+
+    # ------------------------------------------------------------------
+    # Numeric dunder methods -- act as the parameter value
+    # ------------------------------------------------------------------
+
+    def __float__(self):
+        return float(self.value)
+
+    def __index__(self):
+        return int(self.value)
+
+    def __bool__(self):
+        return bool(self.value)
+
+    def __eq__(self, other):
+        return self.value == other
+
+    def __ne__(self, other):
+        return self.value != other
+
+    def __lt__(self, other):
+        return self.value < other
+
+    def __le__(self, other):
+        return self.value <= other
+
+    def __gt__(self, other):
+        return self.value > other
+
+    def __ge__(self, other):
+        return self.value >= other
+
+    def __add__(self, other):
+        return self.value + other
+
+    def __radd__(self, other):
+        return other + self.value
+
+    def __sub__(self, other):
+        return self.value - other
+
+    def __rsub__(self, other):
+        return other - self.value
+
+    def __mul__(self, other):
+        return self.value * other
+
+    def __rmul__(self, other):
+        return other * self.value
+
+    def __truediv__(self, other):
+        return self.value / other
+
+    def __rtruediv__(self, other):
+        return other / self.value
+
+    def __pow__(self, other):
+        return self.value ** other
+
+    def __rpow__(self, other):
+        return other ** self.value
+
+    def __neg__(self):
+        return -self.value
+
+    def __pos__(self):
+        return self.value
+
+    def __abs__(self):
+        return abs(self.value)
+
+    # JAX / numpy integration
+    def __jax_array__(self):
+        import jax.numpy as jnp
+        return jnp.asarray(self.value)
+
+    def __array__(self, dtype=None):
+        import numpy as np
+        return np.asarray(self.value, dtype=dtype)

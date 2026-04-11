@@ -112,6 +112,9 @@ class ThinCentralPlaneDustExtinction(DustExtinction):
 
         return extinction
 
+    def __call__(self, x, y, z):
+        return self.evaluate(x, y, z, self.inc, self.pa, self.xshift, self.yshift, self.amp_extinct)
+
     def attenuation_cube(self, x, y, z):
         """Evaluate the flux attenuation (linear multiplier) at all locations of the cube"""
         return self.evaluate(x, y, z, self.inc, self.pa, self.xshift, self.yshift, self.amp_extinct)
@@ -147,6 +150,9 @@ class ForegroundConstantExtinction(DustExtinction):
         amp_extinct = np.power(10., -0.4*Alam)
         extinction = np.ones(x.shape) * amp_extinct
         return extinction
+
+    def __call__(self, x, y, z):
+        return self.evaluate(x, y, z, self.Alam)
 
     def attenuation_cube(self, x, y, z):
         """Evaluate the flux attenuation (linear multiplier) at all locations of the cube"""
@@ -192,6 +198,9 @@ class ForegroundExponentialExtinction(DustExtinction):
         Alam = Alam0 * np.exp(-(r/rd))
         extinction = np.power(10., -0.4*Alam)
         return extinction
+
+    def __call__(self, x, y, z):
+        return self.evaluate(x, y, z, self.Alam0, self.rd)
 
     def attenuation_cube(self, x, y, z):
         """Evaluate the flux attenuation (linear multiplier) at all locations of the cube"""

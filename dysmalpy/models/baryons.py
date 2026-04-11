@@ -13,22 +13,20 @@ import glob
 
 # Third party imports
 import numpy as np
-import scipy.special as scp_spec
-import scipy.integrate as scp_int
-import scipy.optimize as scp_opt
+import jax.numpy as jnp
+from jax.scipy.special import i0, i1, gammainc, erf
+from scipy.optimize import brentq
 import scipy.interpolate as scp_interp
-import scipy.optimize as scp_opt
-import scipy.integrate as scp_int
-import astropy.constants as apy_con
 
 
 from astropy.table import Table
 
 # Local imports
 from .base import MassModel, _LightMassModel, v_circular, \
-                  sersic_mr, _I0_gaussring
+                  sersic_mr, _I0_gaussring, G_PC_MSUN_KMSQ_EFF
 # from .base import menc_from_vcirc
 from dysmalpy.parameters import DysmalParameter
+from dysmalpy.special import bessel_k0, bessel_k1, gammaincinv
 
 __all__ = ['Sersic', 'DiskBulge', 'LinearDiskBulge', 'ExpDisk', 'BlackHole',
            'GaussianRing',
@@ -48,18 +46,6 @@ _dir_deprojected_sersic_models = os.sep.join([dir_path, "data",
 
 # MASSIVE RING DIRECTORIES:
 _dir_gaussian_ring_tables = os.getenv('GAUSSIAN_RING_PROFILE_DATADIR', None)
-
-# CONSTANTS
-G = apy_con.G
-Msun = apy_con.M_sun
-pc = apy_con.pc
-
-# # +++++++++++++++++++++++++++++
-# # TEMP:
-# G = 6.67e-11 * u.m**3 / u.kg / (u.s**2)  #(unit='m3 / (kg s2)')
-# Msun = 2e30 * u.kg
-# pc = 3e16 * u.m
-# # +++++++++++++++++++++++++++++
 
 # LOGGER SETTINGS
 logging.basicConfig(level=logging.INFO)
@@ -93,8 +79,8 @@ def surf_dens_exp_disk(r, mass, rd):
         Surface density of a thin exponential disk at `r`
     """
 
-    Sig0 = mass / (2. * np.pi * rd**2)
-    Sigr = Sig0 * np.exp(-r/rd)
+    Sig0 = mass / (2. * jnp.pi * rd**2)
+    Sigr = Sig0 * jnp.exp(-r/rd)
 
     return Sigr
 
@@ -120,9 +106,9 @@ def menc_exp_disk(r, mass, rd):
         Enclosed mass of an exponential disk for the given `r`
     """
 
-    Sig0 = mass / (2. * np.pi * rd**2)
+    Sig0 = mass / (2. * jnp.pi * rd**2)
 
-    menc = 2. * np.pi * Sig0 * rd**2 * ( 1 - np.exp(-r/rd)*(1.+r/rd) )
+    menc = 2. * jnp.pi * Sig0 * rd**2 * ( 1 - jnp.exp(-r/rd)*(1.+r/rd) )
 
     return menc
 
@@ -148,17 +134,20 @@ def vcirc_exp_disk(r, mass, rd):
         Circular velocity of an exponential disk as a function of `r`
     """
 
-    #b1 = 1.6783469900166612   # scp_spec.gammaincinv(2.*n, 0.5), n=1
+    #b1 = 1.6783469900166612   # gammaincinv(2.*n, 0.5), n=1
     #rd = r_eff / b1
-    Sig0 = mass / (2. * np.pi * rd**2)
 
     y = r / (2.*rd)
-    expdisk = y**2 * ( scp_spec.i0(y) * scp_spec.k0(y) - scp_spec.i1(y)*scp_spec.k1(y) )
-    VCsq = 4 * np.pi * G.cgs.value*Msun.cgs.value / (1000.*pc.cgs.value) * Sig0 * rd * expdisk
 
-    VCsq[r==0] = 0.
+    bessel_term = i0(y) * bessel_k0(y) - i1(y) * bessel_k1(y)
+    # Clamp to avoid tiny negative values from floating-point noise
+    bessel_term = jnp.maximum(bessel_term, 0.0)
 
-    return np.sqrt(VCsq) / 1.e5
+    VCsq = 2.0 * G_PC_MSUN_KMSQ_EFF * mass / rd * y**2 * bessel_term
+
+    VCsq = jnp.where(r > 0, VCsq, 0.0)
+
+    return jnp.sqrt(VCsq)
 
 
 def sersic_menc_2D_proj(r, mass, n, r_eff):
@@ -189,8 +178,8 @@ def sersic_menc_2D_proj(r, mass, n, r_eff):
     This function is only valid in the case of an infinite cylinder
     """
 
-    bn = scp_spec.gammaincinv(2. * n, 0.5)
-    integ = scp_spec.gammainc(2 * n, bn * (r / r_eff) ** (1. / n))
+    bn = gammaincinv(2. * n, 0.5)
+    integ = gammainc(2 * n, bn * (r / r_eff) ** (1. / n))
     norm = mass
     menc = norm*integ
 
@@ -208,7 +197,7 @@ def mass_comp_conditional_ring(param, modelset):
         sersic_comp.total_mass.prior = ConditionalEmpiricalUniformPrior(f_cond=mass_comp_conditional_bounds_ring)
     """
     # Double check param + model values are same:
-    if param.value != modelset.components[param._model._name].__getattribute__(param._name).value:
+    if param.value != modelset.components[param._model._name].__getattribute__(param._name):
         raise ValueError
 
     # Test radius array:
@@ -534,7 +523,7 @@ class NoordFlat(object):
 
         if interp_type.lower().strip() == 'cubic':
             self.rho_interp_func = scp_interp.interp1d(table_rad, table_rho,
-                        fill_value=np.NaN, bounds_error=False, kind='cubic')
+                        fill_value=np.nan, bounds_error=False, kind='cubic')
             self.rho_interp_extrap_func = scp_interp.interp1d(table_rad, table_rho,
                     fill_value='extrapolate', kind='linear')
         elif interp_type.lower().strip() == 'linear':
@@ -565,7 +554,7 @@ class NoordFlat(object):
 
         if interp_type.lower().strip() == 'cubic':
             self.dlnrhodlnr_interp_func = scp_interp.interp1d(table_rad, table_dlnrho_dlnr,
-                    fill_value=np.NaN, bounds_error=False, kind='cubic')
+                    fill_value=np.nan, bounds_error=False, kind='cubic')
             self.dlnrhodlnr_interp_func_extrap = scp_interp.interp1d(table_rad,
                     table_dlnrho_dlnr, fill_value='extrapolate', kind='linear')
 
@@ -789,7 +778,7 @@ class InfThinMassiveGaussianRing(object):
 
             return potential_gradient_interp
         else:
-            return R*np.NaN
+            return R*np.nan
 
     def enclosed_mass(self, R, R_peak, total_mass):
         """
@@ -825,7 +814,7 @@ class InfThinMassiveGaussianRing(object):
 
             return menc
         else:
-            return R*np.NaN
+            return R*np.nan
 
 
 class BlackHole(MassModel):
@@ -872,6 +861,9 @@ class BlackHole(MassModel):
             else:
                 # Length 1 array input
                 return mr
+
+    def __call__(self, r):
+        return self.evaluate(r, self.BH_mass)
 
     def enclosed_mass(self, r):
         """
@@ -966,9 +958,12 @@ class ExpDisk(MassModel, _LightMassModel):
         """
         return surf_dens_exp_disk(r, 10.**total_mass, r_eff / 1.6783469900166612)
 
+    def __call__(self, r):
+        return self.evaluate(r, self.total_mass, self.r_eff, self.mass_to_light)
+
     @property
     def rd(self):
-        #b1 = 1.6783469900166612   # scp_spec.gammaincinv(2.*n, 0.5), n=1
+        #b1 = 1.6783469900166612   # gammaincinv(2.*n, 0.5), n=1
         return self.r_eff / 1.6783469900166612
 
     def enclosed_mass(self, r):
@@ -1180,14 +1175,14 @@ class Sersic(MassModel, _LightMassModel):
     def _initialize_noord_flatteners(self):
         if self.noord_flat:
             # Initialize NoordFlat object:
-            self.noord_flattener = NoordFlat(n=self.n.value, invq=self.invq)
+            self.noord_flattener = NoordFlat(n=float(self.n), invq=float(self.invq))
 
     def _update_noord_flatteners(self):
-        if self.n.value != self.noord_flattener._n:
-            self.noord_flattener.n = self.n.value
+        if float(self.n) != self.noord_flattener._n:
+            self.noord_flattener.n = float(self.n)
 
-        if self.invq != self.noord_flattener._invq:
-            self.noord_flattener.invq = self.invq
+        if float(self.invq) != self.noord_flattener._invq:
+            self.noord_flattener.invq = float(self.invq)
 
     @staticmethod
     def evaluate(r, total_mass, r_eff, n, mass_to_light):
@@ -1196,6 +1191,9 @@ class Sersic(MassModel, _LightMassModel):
         """
 
         return sersic_mr(r, 10**total_mass, n, r_eff)
+
+    def __call__(self, r):
+        return self.evaluate(r, self.total_mass, self.r_eff, self.n, self.mass_to_light)
 
     def enclosed_mass(self, r):
         """
@@ -1319,8 +1317,8 @@ class Sersic(MassModel, _LightMassModel):
                 dlnrhogas_dlnr_arr = self.noord_flattener.dlnrho_dlnr(r, self.r_eff)
 
             else:
-                bn = scp_spec.gammaincinv(2. * self.n, 0.5)
-                dlnrhogas_dlnr_arr = -2. * (bn / self.n) * np.power(r/self.r_eff, 1./self.n)
+                bn = gammaincinv(2. * self.n, 0.5)
+                dlnrhogas_dlnr_arr = -2. * (bn / self.n) * jnp.power(r/self.r_eff, 1./self.n)
         else:
             dlnrhogas_dlnr_arr = r * 0.
 
@@ -1435,22 +1433,22 @@ class DiskBulge(MassModel, _LightMassModel):
 
     def _initialize_noord_flatteners(self):
         # Initialize NoordFlat objects:
-        self.noord_flattener_disk = NoordFlat(n=self.n_disk.value, invq=self.invq_disk)
-        self.noord_flattener_bulge = NoordFlat(n=self.n_bulge.value, invq=self.invq_bulge)
+        self.noord_flattener_disk = NoordFlat(n=float(self.n_disk), invq=float(self.invq_disk))
+        self.noord_flattener_bulge = NoordFlat(n=float(self.n_bulge), invq=float(self.invq_bulge))
 
     def _update_noord_flatteners(self):
-        if self.n_disk.value != self.noord_flattener_disk._n:
-            self.noord_flattener_disk.n = self.n_disk.value
+        if float(self.n_disk) != self.noord_flattener_disk._n:
+            self.noord_flattener_disk.n = float(self.n_disk)
 
-        if self.n_bulge.value != self.noord_flattener_bulge._n:
-            self.noord_flattener_bulge.n = self.n_bulge.value
+        if float(self.n_bulge) != self.noord_flattener_bulge._n:
+            self.noord_flattener_bulge.n = float(self.n_bulge)
 
 
-        if self.invq_disk != self.noord_flattener_disk._invq:
-            self.noord_flattener_disk.invq = self.invq_disk
+        if float(self.invq_disk) != self.noord_flattener_disk._invq:
+            self.noord_flattener_disk.invq = float(self.invq_disk)
 
-        if self.invq_bulge != self.noord_flattener_bulge._invq:
-            self.noord_flattener_bulge.invq = self.invq_bulge
+        if float(self.invq_bulge) != self.noord_flattener_bulge._invq:
+            self.noord_flattener_bulge.invq = float(self.invq_bulge)
 
 
     @staticmethod
@@ -1465,6 +1463,10 @@ class DiskBulge(MassModel, _LightMassModel):
         mr_disk = sersic_mr(r, mdisk_total, n_disk, r_eff_disk)
 
         return mr_bulge+mr_disk
+
+    def __call__(self, r):
+        return self.evaluate(r, self.total_mass, self.r_eff_disk, self.n_disk,
+                             self.r_eff_bulge, self.n_bulge, self.bt, self.mass_to_light)
 
     def enclosed_mass(self, r):
         """
@@ -1641,7 +1643,7 @@ class DiskBulge(MassModel, _LightMassModel):
         vbulge = self.circular_velocity_bulge(r)
         vdisk = self.circular_velocity_disk(r)
 
-        vcirc = np.sqrt(vbulge**2 + vdisk**2)
+        vcirc = jnp.sqrt(vbulge**2 + vdisk**2)
 
         return vcirc
 
@@ -1670,7 +1672,7 @@ class DiskBulge(MassModel, _LightMassModel):
         """
         vcirc_sq = self.vcirc_sq(r)
         vrot_sq = modelset.kinematic_options.apply_pressure_support(r, modelset, vcirc_sq)
-        vrot = np.sqrt(vrot_sq)
+        vrot = jnp.sqrt(vrot_sq)
 
         return vrot
 
@@ -1699,7 +1701,7 @@ class DiskBulge(MassModel, _LightMassModel):
         """
         vcirc_sq = self.circular_velocity_disk(r) ** 2
         vrot_sq = modelset.kinematic_options.apply_pressure_support(r, modelset, vcirc_sq)
-        vrot = np.sqrt(vrot_sq)
+        vrot = jnp.sqrt(vrot_sq)
 
         return vrot
 
@@ -1727,7 +1729,7 @@ class DiskBulge(MassModel, _LightMassModel):
         """
         vcirc_sq = self.circular_velocity_bulge(r) ** 2
         vrot_sq = modelset.kinematic_options.apply_pressure_support(r, modelset, vcirc_sq)
-        vrot = np.sqrt(vrot_sq)
+        vrot = jnp.sqrt(vrot_sq)
 
         return vrot
 
@@ -1890,8 +1892,8 @@ class DiskBulge(MassModel, _LightMassModel):
             dlnrhogas_dlnr_arr = self.noord_flattener_disk.dlnrho_dlnr(r, self.r_eff_disk)
             return dlnrhogas_dlnr_arr
         else:
-            bn = scp_spec.gammaincinv(2. * self.n_disk, 0.5)
-            return -2. * (bn / self.n_disk) * np.power(r/self.r_eff_disk, 1./self.n_disk)
+            bn = gammaincinv(2. * self.n_disk, 0.5)
+            return -2. * (bn / self.n_disk) * jnp.power(r/self.r_eff_disk, 1./self.n_disk)
 
     def dlnrhogas_dlnr_bulge(self, r):
         if self.noord_flat:
@@ -1903,8 +1905,8 @@ class DiskBulge(MassModel, _LightMassModel):
 
             return dlnrhogas_dlnr_arr
         else:
-            bn = scp_spec.gammaincinv(2. * self.n_bulge, 0.5)
-            return -2. * (bn / self.n_bulge) * np.power(r/self.r_eff_bulge, 1./self.n_bulge)
+            bn = gammaincinv(2. * self.n_bulge, 0.5)
+            return -2. * (bn / self.n_bulge) * jnp.power(r/self.r_eff_bulge, 1./self.n_bulge)
 
     def dlnrhogas_dlnr(self, r):
         """
@@ -2036,22 +2038,22 @@ class LinearDiskBulge(MassModel, _LightMassModel):
 
     def _initialize_noord_flatteners(self):
         # Initialize NoordFlat objects:
-        self.noord_flattener_disk = NoordFlat(n=self.n_disk.value, invq=self.invq_disk)
-        self.noord_flattener_bulge = NoordFlat(n=self.n_bulge.value, invq=self.invq_bulge)
+        self.noord_flattener_disk = NoordFlat(n=float(self.n_disk), invq=float(self.invq_disk))
+        self.noord_flattener_bulge = NoordFlat(n=float(self.n_bulge), invq=float(self.invq_bulge))
 
 
     def _update_noord_flatteners(self):
-        if self.n_disk.value != self.noord_flattener_disk._n:
-            self.noord_flattener_disk.n = self.n_disk.value
+        if float(self.n_disk) != self.noord_flattener_disk._n:
+            self.noord_flattener_disk.n = float(self.n_disk)
 
-        if self.n_bulge.value != self.noord_flattener_bulge._n:
-            self.noord_flattener_bulge.n = self.n_bulge.value
+        if float(self.n_bulge) != self.noord_flattener_bulge._n:
+            self.noord_flattener_bulge.n = float(self.n_bulge)
 
-        if self.invq_disk != self.noord_flattener_disk._invq:
-            self.noord_flattener_disk.invq = self.invq_disk
+        if float(self.invq_disk) != self.noord_flattener_disk._invq:
+            self.noord_flattener_disk.invq = float(self.invq_disk)
 
-        if self.invq_bulge != self.noord_flattener_bulge._invq:
-            self.noord_flattener_bulge.invq = self.invq_bulge
+        if float(self.invq_bulge) != self.noord_flattener_bulge._invq:
+            self.noord_flattener_bulge.invq = float(self.invq_bulge)
 
     @staticmethod
     def evaluate(r, total_mass, r_eff_disk, n_disk, r_eff_bulge, n_bulge, bt, mass_to_light):
@@ -2064,6 +2066,10 @@ class LinearDiskBulge(MassModel, _LightMassModel):
         mr_disk = sersic_mr(r, mdisk_total, n_disk, r_eff_disk)
 
         return mr_bulge+mr_disk
+
+    def __call__(self, r):
+        return self.evaluate(r, self.total_mass, self.r_eff_disk, self.n_disk,
+                             self.r_eff_bulge, self.n_bulge, self.bt, self.mass_to_light)
 
     def enclosed_mass(self, r):
         """
@@ -2224,7 +2230,7 @@ class LinearDiskBulge(MassModel, _LightMassModel):
         vbulge = self.circular_velocity_bulge(r)
         vdisk = self.circular_velocity_disk(r)
 
-        vcirc = np.sqrt(vbulge**2 + vdisk**2)
+        vcirc = jnp.sqrt(vbulge**2 + vdisk**2)
 
         return vcirc
 
@@ -2253,7 +2259,7 @@ class LinearDiskBulge(MassModel, _LightMassModel):
         """
         vcirc_sq = self.vcirc_sq(r)
         vrot_sq = modelset.kinematic_options.apply_pressure_support(r, modelset, vcirc_sq)
-        vrot = np.sqrt(vrot_sq)
+        vrot = jnp.sqrt(vrot_sq)
 
         return vrot
 
@@ -2282,7 +2288,7 @@ class LinearDiskBulge(MassModel, _LightMassModel):
         """
         vcirc_sq = self.circular_velocity_disk(r) ** 2
         vrot_sq = modelset.kinematic_options.apply_pressure_support(r, modelset, vcirc_sq)
-        vrot = np.sqrt(vrot_sq)
+        vrot = jnp.sqrt(vrot_sq)
         return vrot
 
     def velocity_profile_bulge(self, r, modelset):
@@ -2310,7 +2316,7 @@ class LinearDiskBulge(MassModel, _LightMassModel):
         """
         vcirc_sq = self.circular_velocity_bulge(r) ** 2
         vrot_sq = modelset.kinematic_options.apply_pressure_support(r, modelset, vcirc_sq)
-        vrot = np.sqrt(vrot_sq)
+        vrot = jnp.sqrt(vrot_sq)
 
         return vrot
 
@@ -2442,10 +2448,10 @@ class GaussianRing(MassModel, _LightMassModel):
             self.ring_table.invh = self.ring_invh()
 
     def sigma_R(self):
-        return self.FWHM.value / (2.*np.sqrt(2.*np.log(2.)))
+        return self.FWHM / (2.*np.sqrt(2.*np.log(2.)))
 
     def ring_invh(self):
-        return self.R_peak.value / self.FWHM.value
+        return self.R_peak / self.FWHM
 
     def ring_reff(self):
         # Find the effective radius explicitly by definition, using erf function
@@ -2453,15 +2459,16 @@ class GaussianRing(MassModel, _LightMassModel):
         # Solving for:
         #     int_0^xeff t * exp{-4*ln(2)*invh**2*(t-1)**2) = 0.5 * int_0^inf t * exp{-4*ln(2)*invh**2*(t-1)**2)
         try:
+            import scipy.special as _scp_spec
             A = 4*np.log(2)
-            func = lambda ueff: scp_spec.erf(np.sqrt(ueff)) - (np.pi * A * self.ring_invh() ** 2) ** -0.5 * np.exp(-ueff) - \
-                                   0.5 * (1 - scp_spec.erf(np.sqrt(A * self.ring_invh() ** 2)) - (np.pi * A * self.ring_invh() ** 2) ** -0.5 * np.exp(-A * self.ring_invh() ** 2))
-            u_eff = scp_opt.brentq(lambda t: func(t), a=0., b=1.)
+            func = lambda ueff: _scp_spec.erf(np.sqrt(ueff)) - (np.pi * A * self.ring_invh() ** 2) ** -0.5 * np.exp(-ueff) - \
+                                   0.5 * (1 - _scp_spec.erf(np.sqrt(A * self.ring_invh() ** 2)) - (np.pi * A * self.ring_invh() ** 2) ** -0.5 * np.exp(-A * self.ring_invh() ** 2))
+            u_eff = brentq(lambda t: func(t), a=0., b=1.)
             x_eff = 1 + np.sqrt(u_eff / (A * self.ring_invh() ** 2))
-            return x_eff * self.R_peak.value
+            return x_eff * self.R_peak
         except:
             logger.warning("Could not find ring_reff. Assuming reff=Rpeak instead...")
-            return self.R_peak.value
+            return self.R_peak
 
     def r_eff(self):
         return self.ring_reff()
@@ -2469,14 +2476,17 @@ class GaussianRing(MassModel, _LightMassModel):
     @staticmethod
     def evaluate(r, total_mass, R_peak, FWHM, mass_to_light):
         """ Gaussian ring mass surface density """
-        sigma_R = FWHM/ (2.*np.sqrt(2.*np.log(2.)))
+        sigma_R = FWHM/ (2.*jnp.sqrt(2.*jnp.log(2.)))
         I0 = _I0_gaussring(R_peak, sigma_R, 10**total_mass)
-        return I0*np.exp(-(r-R_peak)**2/(2.*sigma_R**2))
+        return I0*jnp.exp(-(r-R_peak)**2/(2.*sigma_R**2))
+
+    def __call__(self, r):
+        return self.evaluate(r, self.total_mass, self.R_peak, self.FWHM, self.mass_to_light)
 
     def surface_density(self, r):
         """ Gaussian ring mass surface density """
-        return self.evaluate(r, self.total_mass.value,
-                             self.R_peak.value, self.FWHM.value, 1.)
+        return self.evaluate(r, self.total_mass,
+                             self.R_peak, self.FWHM, 1.)
 
     def enclosed_mass(self, r):
         """
@@ -2495,7 +2505,7 @@ class GaussianRing(MassModel, _LightMassModel):
         # Check invh is correct
         self._update_ring_table()
 
-        return self.ring_table.enclosed_mass(r, self.R_peak.value, 10**self.total_mass.value)
+        return self.ring_table.enclosed_mass(r, self.R_peak, 10**self.total_mass)
 
     def projected_enclosed_mass(self, r):
         """ Same as enclosed mass as this is infinitely thin gaussian ring """
@@ -2517,7 +2527,7 @@ class GaussianRing(MassModel, _LightMassModel):
             Circular velocity in km/s
         """
 
-        return np.sqrt(self.vcirc_sq(r))
+        return jnp.sqrt(self.vcirc_sq(r))
 
     def vcirc_sq(self, r):
         """
@@ -2559,7 +2569,7 @@ class GaussianRing(MassModel, _LightMassModel):
         # Check invh is correct
         self._update_ring_table()
 
-        return self.ring_table.potential_gradient(r, self.R_peak.value, 10**self.total_mass.value)
+        return self.ring_table.potential_gradient(r, self.R_peak, 10**self.total_mass)
 
     def light_profile(self, r):
         """
@@ -2575,7 +2585,7 @@ class GaussianRing(MassModel, _LightMassModel):
         light : float or array
             Relative line flux as a function of radius
         """
-        #return 1.*np.exp(-(r-self.R_peak.value)**2/(2.*self.sigma_R()**2))
+        #return 1.*np.exp(-(r-self.R_peak)**2/(2.*self.sigma_R()**2))
         return self.surface_density(r) * (1./self.mass_to_light)
 
     def rhogas(self, r):
@@ -2617,7 +2627,7 @@ class GaussianRing(MassModel, _LightMassModel):
         """
         if 'gas' in self.baryon_type.lower().strip():
             # Inf thin: rho(R,z=0) = Sigma(R)
-            dlnrhogas_dlnr_arr = - r * (r-self.R_peak.value) / (self.sigma_R()**2)
+            dlnrhogas_dlnr_arr = - r * (r-self.R_peak) / (self.sigma_R()**2)
         else:
             dlnrhogas_dlnr_arr = r * 0.
 

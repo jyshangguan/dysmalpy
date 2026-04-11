@@ -1,5 +1,5 @@
 # coding=utf8
-# Copyright (c) MPE/IR-Submm Group. See LICENSE.rst for license information. 
+# Copyright (c) MPE/IR-Submm Group. See LICENSE.rst for license information.
 #
 # Higher-order kinematics models for DysmalPy
 
@@ -11,6 +11,7 @@ import logging
 
 # Third party imports
 import numpy as np
+import jax.numpy as jnp
 # import scipy.misc as scp_misc
 # import scipy.integrate as scp_integrate
 
@@ -161,36 +162,35 @@ class BiconicalOutflow(HigherOrderKinematicsSeparate, _DysmalFittable3DModel):
     def evaluate(self, x, y, z, n, vmax, rturn, thetain, dtheta, rend, norm_flux, tau_flux):
         """Evaluate the outflow velocity as a function of position x, y, z"""
 
-        r = np.sqrt(x**2 + y**2 + z**2)
-        theta = np.arccos(np.abs(z)/r)*180./np.pi
-        theta[r == 0] = 0.
-        vel = np.zeros(r.shape)
+        r = jnp.sqrt(x**2 + y**2 + z**2)
+        theta = jnp.arccos(jnp.where(r > 0, jnp.abs(z) / r, 1.)) * 180. / jnp.pi
+        vel = jnp.zeros_like(r)
 
         if self.profile_type == 'increase':
 
             amp = vmax/rend**n
-            vel[r <= rend] = amp*r[r <= rend]**n
-            vel[r == 0] = 0
+            vel = jnp.where(r <= rend, amp * r ** n, vel)
+            vel = jnp.where(r == 0, 0., vel)
 
         elif self.profile_type == 'decrease':
 
             amp = -vmax/rend**n
-            vel[r <= rend] = vmax + amp*r[r <= rend]** n
-
+            vel = jnp.where(r <= rend, vmax + amp * r ** n, vel)
 
         elif self.profile_type == 'both':
 
-            vel[r <= rturn] = vmax*(r[r <= rturn]/rturn)**n
-            ind = (r > rturn) & (r <= 2*rturn)
-            vel[ind] = vmax*(2 - r[ind]/rturn)**n
+            vel_inc = jnp.where(r <= rturn, vmax * (r / rturn) ** n, 0.)
+            ind_outer = (r > rturn) & (r <= 2 * rturn)
+            vel_dec = jnp.where(ind_outer, vmax * (2 - r / rturn) ** n, 0.)
+            vel = vel_inc + vel_dec
 
         elif self.profile_type == 'constant':
 
-            vel[r <= rend] = vmax
+            vel = jnp.where(r <= rend, vmax, vel)
 
-        thetaout = np.min([thetain+dtheta, 90.])
+        thetaout = jnp.minimum(thetain + dtheta, 90.)
         ind_zero = (theta < thetain) | (theta > thetaout) | (vel < 0)
-        vel[ind_zero] = 0.
+        vel = jnp.where(ind_zero, 0., vel)
 
         return vel
 
@@ -202,15 +202,14 @@ class BiconicalOutflow(HigherOrderKinematicsSeparate, _DysmalFittable3DModel):
     def light_profile(self, x, y, z):
         """Evaluate the outflow line flux as a function of position x, y, z"""
 
-        r = np.sqrt(x**2 + y**2 + z**2)
-        theta = np.arccos(np.abs(z) / r) * 180. / np.pi
-        theta[r == 0] = 0.
-        flux = 10**self.norm_flux*np.exp(-self.tau_flux*(r/self.rend))
-        thetaout = np.min([self.thetain + self.dtheta, 90.])
+        r = jnp.sqrt(x**2 + y**2 + z**2)
+        theta = jnp.arccos(jnp.where(r > 0, jnp.abs(z) / r, 1.)) * 180. / jnp.pi
+        flux = 10**self.norm_flux * jnp.exp(-self.tau_flux * (r / self.rend))
+        thetaout = jnp.minimum(self.thetain + self.dtheta, 90.)
         ind_zero = ((theta < self.thetain) |
                     (theta > thetaout) |
                     (r > self.rend))
-        flux[ind_zero] = 1e-16       # To avoid NaNs
+        flux = jnp.where(ind_zero, 1e-16, flux)       # To avoid NaNs
 
         return flux
 
@@ -235,25 +234,18 @@ class BiconicalOutflow(HigherOrderKinematicsSeparate, _DysmalFittable3DModel):
             For biconical outflows, this is the +rhat direction, in spherical coordinates
             (r,phi,theta).
         """
-        r = np.sqrt(x ** 2 + y ** 2 + z ** 2 )
+        r = jnp.sqrt(x ** 2 + y ** 2 + z ** 2)
 
-        vhat_y = y/r
-        vhat_z = z/r
-
-        # Excise r=0 values
-        vhat_y = utils.replace_values_by_refarr(vhat_y, r, 0., 0.)
-        vhat_z = utils.replace_values_by_refarr(vhat_z, r, 0., 0.)
+        vhat_y = jnp.where(r > 0, y / r, 0.)
+        vhat_z = jnp.where(r > 0, z / r, 0.)
 
         if not _save_memory:
-            vhat_x = x/r
+            vhat_x = jnp.where(r > 0, x / r, 0.)
 
-            # Excise r=0 values
-            vhat_x = utils.replace_values_by_refarr(vhat_x, r, 0., 0.)
-
-            vel_dir_unit_vector = np.array([vhat_x, vhat_y, vhat_z])
+            vel_dir_unit_vector = jnp.stack([vhat_x, vhat_y, vhat_z], axis=0)
         else:
             # Only calculate y,z directions
-            vel_dir_unit_vector = np.array([0., vhat_y, vhat_z], dtype=object)
+            vel_dir_unit_vector = jnp.stack([jnp.zeros_like(vhat_y), vhat_y, vhat_z], axis=0)
 
         return vel_dir_unit_vector
 
@@ -300,7 +292,10 @@ class UnresolvedOutflow(HigherOrderKinematicsSeparate, _DysmalFittable3DModel):
 
     @staticmethod
     def evaluate(x, y, z, vcenter, fwhm, amplitude):
-        return np.ones(x.shape)*vcenter
+        return jnp.ones_like(x) * vcenter
+
+    def __call__(self, x, y, z):
+        return self.evaluate(x, y, z, self.vcenter, self.fwhm, self.amplitude)
 
     def velocity(self, x, y, z, *args):
         """Return the velocity as a function of x, y, z"""
@@ -309,19 +304,15 @@ class UnresolvedOutflow(HigherOrderKinematicsSeparate, _DysmalFittable3DModel):
     def dispersion_profile(self, x, y, z, fwhm=None):
         """Dispersion profile for the outflow"""
         if fwhm is None: fwhm = self.fwhm
-        return np.ones(x.shape)*(fwhm/2.35482)
+        return jnp.ones_like(x) * (fwhm / 2.35482)
 
     def light_profile(self, x, y, z):
         """Evaluate the outflow line flux as a function of position x, y, z
            All the light will be deposited at the center pixel."""
 
-        # The coordinates where the unresolved outflow is placed needs to be
-        # an integer pixel so for now we round to nearest integer.
-
-        r = np.sqrt(x**2 + y**2 + z**2)
-        ind_min = r.argmin()
-        flux = x*0.
-        flux.flat[ind_min] = self.amplitude.value
+        r = jnp.sqrt(x**2 + y**2 + z**2)
+        r_min = jnp.min(r)
+        flux = self.amplitude * jnp.exp(-0.5 * ((r - r_min) / 0.01) ** 2)
 
         return flux
 
@@ -370,9 +361,12 @@ class UniformRadialFlow(HigherOrderKinematicsPerturbation, _DysmalFittable3DMode
     def evaluate(x, y, z, vr):
         """Evaluate the radial velocity as a function of position x, y, z"""
 
-        vel = np.ones(x.shape) * (vr)
+        vel = jnp.ones_like(x) * (vr)
 
         return vel
+
+    def __call__(self, x, y, z):
+        return self.evaluate(x, y, z, self.vr)
 
     def velocity(self, x, y, z, *args):
         """Return the velocity as a function of x, y, z"""
@@ -400,25 +394,18 @@ class UniformRadialFlow(HigherOrderKinematicsPerturbation, _DysmalFittable3DMode
             For a uniform radial flow, this is the +rhat direction, in spherical coordinates
             (r,phi,theta).
         """
-        r = np.sqrt(x ** 2 + y ** 2 + z ** 2 )
+        r = jnp.sqrt(x ** 2 + y ** 2 + z ** 2)
 
-        vhat_y = y/r
-        vhat_z = z/r
-
-        # Excise r=0 values
-        vhat_y = utils.replace_values_by_refarr(vhat_y, r, 0., 0.)
-        vhat_z = utils.replace_values_by_refarr(vhat_z, r, 0., 0.)
+        vhat_y = jnp.where(r > 0, y / r, 0.)
+        vhat_z = jnp.where(r > 0, z / r, 0.)
 
         if not _save_memory:
-            vhat_x = x/r
+            vhat_x = jnp.where(r > 0, x / r, 0.)
 
-            # Excise r=0 values
-            vhat_x = utils.replace_values_by_refarr(vhat_x, r, 0., 0.)
-
-            vel_dir_unit_vector = np.array([vhat_x, vhat_y, vhat_z])
+            vel_dir_unit_vector = jnp.stack([vhat_x, vhat_y, vhat_z], axis=0)
         else:
             # Only y,z directions
-            vel_dir_unit_vector = np.array([0., vhat_y, vhat_z], dtype=object)
+            vel_dir_unit_vector = jnp.stack([jnp.zeros_like(vhat_y), vhat_y, vhat_z], axis=0)
 
         return vel_dir_unit_vector
 
@@ -451,9 +438,12 @@ class PlanarUniformRadialFlow(HigherOrderKinematicsPerturbation, _DysmalFittable
     def evaluate(x, y, z, vr):
         """Evaluate the radial velocity as a function of position x, y, z"""
 
-        vel = np.ones(x.shape) * (vr)
+        vel = jnp.ones_like(x) * (vr)
 
         return vel
+
+    def __call__(self, x, y, z):
+        return self.evaluate(x, y, z, self.vr)
 
     def velocity(self, x, y, z, *args):
         """Return the velocity as a function of x, y, z"""
@@ -482,24 +472,18 @@ class PlanarUniformRadialFlow(HigherOrderKinematicsPerturbation, _DysmalFittable
             (R,phi,z).
         """
 
-        R = np.sqrt(x ** 2 + y ** 2)
+        R = jnp.sqrt(x ** 2 + y ** 2)
 
-        vhat_y = y/R
-
-        # Excise rgal=0 values
-        vhat_y = utils.replace_values_by_refarr(vhat_y, R, 0., 0.)
+        vhat_y = jnp.where(R > 0, y / R, 0.)
 
         if not _save_memory:
-            vhat_x = x/R
-            vhat_z = z * 0.
+            vhat_x = jnp.where(R > 0, x / R, 0.)
+            vhat_z = jnp.zeros_like(z)
 
-            # Excise rgal=0 values
-            vhat_x = utils.replace_values_by_refarr(vhat_x, R, 0., 0.)
-
-            vel_dir_unit_vector = np.array([vhat_x, vhat_y, vhat_z])
+            vel_dir_unit_vector = jnp.stack([vhat_x, vhat_y, vhat_z], axis=0)
         else:
             # Only y direction: z is by definition 0.
-            vel_dir_unit_vector = np.array([0., vhat_y, 0.], dtype=object)
+            vel_dir_unit_vector = jnp.stack([jnp.zeros_like(vhat_y), vhat_y, jnp.zeros_like(vhat_y)], axis=0)
 
         return vel_dir_unit_vector
 
@@ -539,12 +523,26 @@ class AzimuthalPlanarRadialFlow(HigherOrderKinematicsPerturbation, _DysmalFittab
 
         super(AzimuthalPlanarRadialFlow, self).__init__(**kwargs)
 
+    def _get_geom_phi_rad_polar(self, x, y):
+        """JAX-compatible polar angle phi from (x, y).
+
+        Returns phi in [-pi, pi] computed as arcsin(y/R) with correction
+        for x < 0.
+        """
+        R = jnp.sqrt(x ** 2 + y ** 2)
+        phi = jnp.arcsin(jnp.where(R > 0, y / R, 0.))
+        # For x < 0, the correct angle is pi - arcsin(y/R)
+        phi = jnp.where(x < 0, jnp.pi - phi, phi)
+        # At R=0, phi should be 0
+        phi = jnp.where(R == 0, 0., phi)
+        return phi
+
     def evaluate(self, x, y, z, m, phi0, model_set):
         """Evaluate the radial velocity as a function of position x, y, z"""
-        phi0_rad = phi0 * np.pi / 180.
-        phi_gal_rad = utils.get_geom_phi_rad_polar(x, y)
-        R = np.sqrt(x**2 + y**2)
-        vel = self.vr(R, model_set) * np.cos(m*(phi_gal_rad-phi0_rad))
+        phi0_rad = phi0 * jnp.pi / 180.
+        phi_gal_rad = self._get_geom_phi_rad_polar(x, y)
+        R = jnp.sqrt(x**2 + y**2)
+        vel = self.vr(R, model_set) * jnp.cos(m * (phi_gal_rad - phi0_rad))
 
         return vel
 
@@ -575,24 +573,18 @@ class AzimuthalPlanarRadialFlow(HigherOrderKinematicsPerturbation, _DysmalFittab
             (R,phi,z).
         """
 
-        R = np.sqrt(x ** 2 + y ** 2)
+        R = jnp.sqrt(x ** 2 + y ** 2)
 
-        vhat_y = y/R
-
-        # Excise rgal=0 values
-        vhat_y = utils.replace_values_by_refarr(vhat_y, R, 0., 0.)
+        vhat_y = jnp.where(R > 0, y / R, 0.)
 
         if not _save_memory:
-            vhat_x = x/R
-            vhat_z = z * 0.
+            vhat_x = jnp.where(R > 0, x / R, 0.)
+            vhat_z = jnp.zeros_like(z)
 
-            # Excise rgal=0 values
-            vhat_x = utils.replace_values_by_refarr(vhat_x, R, 0., 0.)
-
-            vel_dir_unit_vector = np.array([vhat_x, vhat_y, vhat_z])
+            vel_dir_unit_vector = jnp.stack([vhat_x, vhat_y, vhat_z], axis=0)
         else:
             # Only y direction: z is by definition 0.
-            vel_dir_unit_vector = np.array([0., vhat_y, 0.], dtype=object)
+            vel_dir_unit_vector = jnp.stack([jnp.zeros_like(vhat_y), vhat_y, jnp.zeros_like(vhat_y)], axis=0)
 
         return vel_dir_unit_vector
 
@@ -632,20 +624,17 @@ class UniformBarFlow(HigherOrderKinematicsPerturbation, _DysmalFittable3DModel):
     def evaluate(x, y, z, vbar, phi, bar_width):
         """Evaluate the bar velocity amplitude as a function of position x, y, z"""
 
-        phi_rad = phi * np.pi / 180.
+        phi_rad = phi * jnp.pi / 180.
         # Rotate by phi_rad:
-        ybar = - np.sin(phi_rad) * x + np.cos(phi_rad) * y
+        ybar = - jnp.sin(phi_rad) * x + jnp.cos(phi_rad) * y
 
-        vel = np.ones(ybar.shape) * (vbar)
-        if len(ybar.shape) > 0:
-            # Array-like inputs
-            vel[np.abs(ybar) > 0.5*bar_width] = 0.
-        else:
-            # Float inputs:
-            if np.abs(ybar) > 0.5*bar_width:
-                vel = 0.
+        vel = jnp.ones_like(ybar) * (vbar)
+        vel = jnp.where(jnp.abs(ybar) > 0.5 * bar_width, 0., vel)
 
         return vel
+
+    def __call__(self, x, y, z):
+        return self.evaluate(x, y, z, self.vbar, self.phi, self.bar_width)
 
     def velocity(self, x, y, z, *args):
         """Return the velocity as a function of x, y, z"""
@@ -672,15 +661,15 @@ class UniformBarFlow(HigherOrderKinematicsPerturbation, _DysmalFittable3DModel):
             For a bar uniform flow, this is the sign(xbar) direction, in cartesian coordinates.
         """
         # Rotate by phi_rad:
-        phi_rad = self.phi * np.pi / 180.
-        xbar = np.cos(phi_rad) * x + np.sin(phi_rad) * y
+        phi_rad = self.phi * jnp.pi / 180.
+        xbar = jnp.cos(phi_rad) * x + jnp.sin(phi_rad) * y
         if not _save_memory:
-            vel_dir_unit_vector = np.array([ np.cos(phi_rad)*np.sign(xbar),
-                                             np.sin(phi_rad)*np.sign(xbar), z*0.])
+            vel_dir_unit_vector = jnp.stack([jnp.cos(phi_rad) * jnp.sign(xbar),
+                                             jnp.sin(phi_rad) * jnp.sign(xbar),
+                                             jnp.zeros_like(z)], axis=0)
         else:
             # Only return y direction
-            vel_dir_unit_vector = np.array([ 0., np.sin(phi_rad)*np.sign(xbar), 0.], dtype=object)
-
+            vel_dir_unit_vector = jnp.stack([jnp.zeros_like(xbar), jnp.sin(phi_rad) * jnp.sign(xbar), jnp.zeros_like(xbar)], axis=0)
 
         return vel_dir_unit_vector
 
@@ -728,19 +717,13 @@ class VariableXBarFlow(HigherOrderKinematicsPerturbation, _DysmalFittable3DModel
     def evaluate(self, x, y, z, phi, bar_width, model_set):
         """Evaluate the bar velocity amplitude as a function of position x, y, z"""
 
-        phi_rad = phi * np.pi / 180.
+        phi_rad = phi * jnp.pi / 180.
         # Rotate by phi_rad:
-        xbar =   np.cos(phi_rad) * x + np.sin(phi_rad) * y
-        ybar = - np.sin(phi_rad) * x + np.cos(phi_rad) * y
+        xbar =   jnp.cos(phi_rad) * x + jnp.sin(phi_rad) * y
+        ybar = - jnp.sin(phi_rad) * x + jnp.cos(phi_rad) * y
 
-        vel = self.vbar(np.abs(xbar), model_set)
-        if len(ybar.shape) > 0:
-            # Array-like inputs
-            vel[np.abs(ybar) > 0.5*bar_width] = 0.
-        else:
-            # Float inputs:
-            if np.abs(ybar) > 0.5*bar_width:
-                vel = 0.
+        vel = self.vbar(jnp.abs(xbar), model_set)
+        vel = jnp.where(jnp.abs(ybar) > 0.5 * bar_width, 0., vel)
 
         return vel
 
@@ -769,15 +752,15 @@ class VariableXBarFlow(HigherOrderKinematicsPerturbation, _DysmalFittable3DModel
             For a bar uniform flow, this is the sign(xbar) direction, in cartesian coordinates.
         """
         # Rotate by phi_rad:
-        phi_rad = self.phi * np.pi / 180.
-        xbar = np.cos(phi_rad) * x + np.sin(phi_rad) * y
+        phi_rad = self.phi * jnp.pi / 180.
+        xbar = jnp.cos(phi_rad) * x + jnp.sin(phi_rad) * y
         if not _save_memory:
-            vel_dir_unit_vector = np.array([ np.cos(phi_rad)*np.sign(xbar),
-                                             np.sin(phi_rad)*np.sign(xbar), z*0.])
+            vel_dir_unit_vector = jnp.stack([jnp.cos(phi_rad) * jnp.sign(xbar),
+                                             jnp.sin(phi_rad) * jnp.sign(xbar),
+                                             jnp.zeros_like(z)], axis=0)
         else:
             # Only return y direction
-            vel_dir_unit_vector = np.array([ 0., np.sin(phi_rad)*np.sign(xbar), 0.], dtype=object)
-
+            vel_dir_unit_vector = jnp.stack([jnp.zeros_like(xbar), jnp.sin(phi_rad) * jnp.sign(xbar), jnp.zeros_like(xbar)], axis=0)
 
         return vel_dir_unit_vector
 
@@ -815,20 +798,32 @@ class UniformWedgeFlow(HigherOrderKinematicsPerturbation, _DysmalFittable3DModel
     def __init__(self, **kwargs):
         super(UniformWedgeFlow, self).__init__(**kwargs)
 
+    def _get_geom_phi_rad_polar(self, x, y):
+        """JAX-compatible polar angle phi from (x, y).
+
+        Returns phi in [-pi, pi] computed as arcsin(y/R) with correction
+        for x < 0.
+        """
+        R = jnp.sqrt(x ** 2 + y ** 2)
+        phi = jnp.arcsin(jnp.where(R > 0, y / R, 0.))
+        # For x < 0, the correct angle is pi - arcsin(y/R)
+        phi = jnp.where(x < 0, jnp.pi - phi, phi)
+        # At R=0, phi should be 0
+        phi = jnp.where(R == 0, 0., phi)
+        return phi
+
     def evaluate(self, x, y, z, vr, theta, phi):
         """Evaluate the radial velocity as a function of position x, y, z"""
-        phi_rad = phi * np.pi / 180.
-        theta_rad = theta * np.pi / 180.
-        phi_gal_rad = utils.get_geom_phi_rad_polar(x, y)
+        phi_rad = phi * jnp.pi / 180.
+        theta_rad = theta * jnp.pi / 180.
+        phi_gal_rad = self._get_geom_phi_rad_polar(x, y)
 
-        vel = np.ones(x.shape) * (vr)
-        if len(x.shape) > 0:
-            # Array-like inputs
-            vel[np.abs(np.cos(phi_gal_rad-phi_rad)) < np.abs(np.cos(0.5*theta_rad))] = 0.
-        else:
-            # Float inputs:
-            if np.abs(np.cos(phi_gal_rad-phi_rad)) < np.abs(np.cos(0.5*theta_rad)):
-                vel = 0.
+        vel = jnp.ones_like(x) * (vr)
+        vel = jnp.where(
+            jnp.abs(jnp.cos(phi_gal_rad - phi_rad)) < jnp.abs(jnp.cos(0.5 * theta_rad)),
+            0.,
+            vel
+        )
 
         return vel
 
@@ -859,24 +854,18 @@ class UniformWedgeFlow(HigherOrderKinematicsPerturbation, _DysmalFittable3DModel
             (R,phi,z).
         """
 
-        R = np.sqrt(x ** 2 + y ** 2)
+        R = jnp.sqrt(x ** 2 + y ** 2)
 
-        vhat_y = y/R
-
-        # Excise rgal=0 values
-        vhat_y = utils.replace_values_by_refarr(vhat_y, R, 0., 0.)
+        vhat_y = jnp.where(R > 0, y / R, 0.)
 
         if not _save_memory:
-            vhat_x = x/R
-            vhat_z = z * 0.
+            vhat_x = jnp.where(R > 0, x / R, 0.)
+            vhat_z = jnp.zeros_like(z)
 
-            # Excise rgal=0 values
-            vhat_x = utils.replace_values_by_refarr(vhat_x, R, 0., 0.)
-
-            vel_dir_unit_vector = np.array([vhat_x, vhat_y, vhat_z])
+            vel_dir_unit_vector = jnp.stack([vhat_x, vhat_y, vhat_z], axis=0)
         else:
             # Only y direction: z is by definition 0.
-            vel_dir_unit_vector = np.array([0., vhat_y, 0.], dtype=object)
+            vel_dir_unit_vector = jnp.stack([jnp.zeros_like(vhat_y), vhat_y, jnp.zeros_like(vhat_y)], axis=0)
 
         return vel_dir_unit_vector
 
@@ -956,77 +945,31 @@ class SpiralDensityWave(HigherOrderKinematicsPerturbation, _DysmalFittable3DMode
         vphi1 = self.vphi_perturb(x, y, z)
 
         # Tuple in the native cylindrical coordinates (really polar, ignoring z)
-        return (vr1, vphi1, z*0.)
+        return (vr1, vphi1, jnp.zeros_like(z))
+
+    def _get_geom_phi_rad_polar(self, x, y):
+        """JAX-compatible polar angle phi from (x, y).
+
+        Returns phi in [-pi, pi] computed as arcsin(y/R) with correction
+        for x < 0.
+        """
+        R = jnp.sqrt(x ** 2 + y ** 2)
+        phi = jnp.arcsin(jnp.where(R > 0, y / R, 0.))
+        # For x < 0, the correct angle is pi - arcsin(y/R)
+        phi = jnp.where(x < 0, jnp.pi - phi, phi)
+        # At R=0, phi should be 0
+        phi = jnp.where(R == 0, 0., phi)
+        return phi
 
     def ep_freq_sq(self, R):
         """ Return kappa^2, square of the epicyclic frequency """
-        # dx=1.e-5
-        # order=3
-        #
-        # V = self.Vrot(R)
-        # Om = V / R
-        # shR = np.shape(R)
-        # if len(shR) == 0:
-        #     dVrot_dR = scp_misc.derivative(self.Vrot, R, dx=dx, n=1, order=order)
-        # else:
-        #     dVrot_dR = R * 0.
-        #     for i in range(shR[0]):
-        #         if len(shR) == 1:
-        #             dVrot_dR[i] = scp_misc.derivative(self.Vrot, R[i], dx=dx, n=1, order=order)
-        #         else:
-        #             for j in range(shR[1]):
-        #                 if len(shR) == 2:
-        #                     dVrot_dR[i,j] = scp_misc.derivative(self.Vrot, R[i,j],
-        #                                                           dx=dx, n=1, order=order)
-        #                 else:
-        #                     for k in range(shR[2]):
-        #                         dVrot_dR[i,j,k] = scp_misc.derivative(self.Vrot, R[i,j,k],
-        #                                                               dx=dx, n=1, order=order)
-        #
-        #
-        # kappasq = 2*Om * ( R * (1./R * dVrot_dR - V/R**2 ) + 2*Om )
-
-
         V = self.Vrot(R)
         Om = V / R
         dV_dR = self.dVrot_dR(R)
 
-        kappasq = 2*Om * ( R * (1./R * dV_dR - V/R**2 ) + 2*Om )
+        kappasq = 2. * Om * (R * (1. / R * dV_dR - V / R ** 2) + 2. * Om)
 
         return kappasq
-
-    # def k(self, R):
-    #     """Calculate wavenumber"""
-    #
-    #     Om = self.Vrot(R) / R
-    #     kappasq = self.ep_freq_sq(R)
-    #     eta = np.sqrt(1. - kappasq / (self.m**2 * (Om-self.Om_p)**2))
-    #
-    #     wavenum = (1.-self.Om_p / Om) * eta * self.m * Om / self.cs
-    #
-    #     return wavenum
-    #
-    # def f(self, R):
-    #     """Shape of spiral arms, with f=m*phi = Int_0^R(k dR) """
-    #
-    #     shR = np.shape(R)
-    #     if len(shR) == 0:
-    #         farr, abserr = scp_integrate.quad(self.k, 0, R)
-    #     else:
-    #         farr = R * 0.
-    #         for i in range(shR[0]):
-    #             if len(shR) == 1:
-    #                 farr[i], abserr = scp_integrate.quad(self.k, 0, R[i])
-    #             else:
-    #                 for j in range(shR[1]):
-    #                     if len(shR) == 2:
-    #                         farr[i,j], abserr = scp_integrate.quad(self.k, 0, R[i,j])
-    #                     else:
-    #                         for k in range(shR[2]):
-    #                             farr[i,j,k], abserr = scp_integrate.quad(self.k, 0, R[i,j,k])
-    #
-    #     return farr
-
 
     def k(self, R):
         """Calculate wavenumber"""
@@ -1044,17 +987,17 @@ class SpiralDensityWave(HigherOrderKinematicsPerturbation, _DysmalFittable3DMode
         Given by Eq. A9, Davies et al. 2009, ApJ, 702, 114
         """
 
-        R = np.sqrt(x**2 + y**2)
-        phi0_rad = self.phi0 * np.pi / 180.
-        phi = utils.get_geom_phi_rad_polar(x, y) - phi0_rad
+        R = jnp.sqrt(x**2 + y**2)
+        phi0_rad = self.phi0 * jnp.pi / 180.
+        phi = self._get_geom_phi_rad_polar(x, y) - phi0_rad
 
         fvals = self.f(R)
         rho0vals = self.rho0(R)
 
-        rho1 = self.epsilon * rho0vals * np.cos( self.m*phi - fvals )
+        rho1 = self.epsilon * rho0vals * jnp.cos(self.m * phi - fvals)
 
         # Excise R=0 values
-        rho1 = utils.replace_values_by_refarr(rho1, R, 0., 0.)
+        rho1 = jnp.where(R == 0, 0., rho1)
 
         return rho1
 
@@ -1066,18 +1009,18 @@ class SpiralDensityWave(HigherOrderKinematicsPerturbation, _DysmalFittable3DMode
         Here inflow is NEGATIVE, outflow is POSITIVE.
         """
 
-        R = np.sqrt(x**2 + y**2)
+        R = jnp.sqrt(x**2 + y**2)
         Om = self.Vrot(R) / R
-        phi0_rad = self.phi0 * np.pi / 180.
-        phi = utils.get_geom_phi_rad_polar(x, y) - phi0_rad
+        phi0_rad = self.phi0 * jnp.pi / 180.
+        phi = self._get_geom_phi_rad_polar(x, y) - phi0_rad
 
         fvals = self.f(R)
         kvals = self.k(R)
 
-        vr1 = -self.epsilon * self.m*(Om-self.Om_p)/kvals * np.cos( self.m*phi - fvals )
+        vr1 = -self.epsilon * self.m * (Om - self.Om_p) / kvals * jnp.cos(self.m * phi - fvals)
 
         # Excise R=0 values
-        vr1 = utils.replace_values_by_refarr(vr1, R, 0., 0.)
+        vr1 = jnp.where(R == 0, 0., vr1)
 
         return vr1
 
@@ -1088,20 +1031,20 @@ class SpiralDensityWave(HigherOrderKinematicsPerturbation, _DysmalFittable3DMode
         Given by Eq. A11, Davies et al. 2009, ApJ, 702, 114
         """
 
-        R = np.sqrt(x**2 + y**2)
+        R = jnp.sqrt(x**2 + y**2)
         Om = self.Vrot(R) / R
-        phi0_rad = self.phi0 * np.pi / 180.
-        phi = utils.get_geom_phi_rad_polar(x, y) - phi0_rad
+        phi0_rad = self.phi0 * jnp.pi / 180.
+        phi = self._get_geom_phi_rad_polar(x, y) - phi0_rad
 
         fvals = self.f(R)
         kvals = self.k(R)
 
         kappasq = self.ep_freq_sq(R)
 
-        vphi1 = self.epsilon * kappasq/(2.*kvals*Om) * np.sin( self.m*phi - fvals )
+        vphi1 = self.epsilon * kappasq / (2. * kvals * Om) * jnp.sin(self.m * phi - fvals)
 
         # Excise R=0 values
-        vphi1 = utils.replace_values_by_refarr(vphi1, R, 0., 0.)
+        vphi1 = jnp.where(R == 0, 0., vphi1)
 
         return vphi1
 
@@ -1114,14 +1057,13 @@ class SpiralDensityWave(HigherOrderKinematicsPerturbation, _DysmalFittable3DMode
         Uses NEGATIVE for inflow, POSITIVE for outflow
         """
 
-        R = np.sqrt(x ** 2 + y ** 2)
+        R = jnp.sqrt(x ** 2 + y ** 2)
         vr1 = self.vr_perturb(x, y, z)
         vphi1 = self.vphi_perturb(x, y, z)
 
-        vLOS1 = vr1*(y/R) + vphi1*(x/R)
-
-        # Excise R=0 values
-        vLOS1 = utils.replace_values_by_refarr(vLOS1, R, 0., 0.)
+        vLOS1 = jnp.where(R > 0,
+                          vr1 * (y / R) + vphi1 * (x / R),
+                          0.)
 
         return vLOS1
 
@@ -1137,7 +1079,7 @@ class SpiralDensityWave(HigherOrderKinematicsPerturbation, _DysmalFittable3DMode
         vphi1 = self.vphi_perturb(x, y, z)
 
         # Tuple in the native cylindrical coordinates (really polar, ignoring z)
-        return (vr1, vphi1, z*0.)
+        return (vr1, vphi1, jnp.zeros_like(z))
 
 
     def light_profile(self, x, y, z):
@@ -1155,7 +1097,7 @@ class SpiralDensityWave(HigherOrderKinematicsPerturbation, _DysmalFittable3DMode
         Need matmul(vel_dir_matrix, vel) = vel in (x,y,z). So:
 
         .. code-block:: text
-        
+
             vel_dir_matrix = [[Rtox, phitox, ztox],
                             [Rtoy, phitoy, ztoy],
                             [Rtoz, phitoz, ztoz]]
@@ -1175,42 +1117,31 @@ class SpiralDensityWave(HigherOrderKinematicsPerturbation, _DysmalFittable3DMode
             Transform of the velocity from the native coordinates to the output cartesian frame.
 
         """
-        R = np.sqrt(x ** 2 + y ** 2)
-        # vel_dir_matrix = np.array([[x/R, -y/R, 0.*z],
-        #                            [y/R,  x/R, 0.*z],
-        #                            [0.*z, 0.*z, 0.*z]])
+        R = jnp.sqrt(x ** 2 + y ** 2)
 
-        # As zsky_unit_vector = [ x*0., y*0. + np.sin(inc), z*0. - np.cos(inc) ]
-        # The dot is:
-        # vr :  y/R*sin(i) = sin(phi) * sin(i)
-        # vphi: x/R*sin(i) = cos(phi) * sin(i)
-        # So really only picking out the y-cartesian coord
-
-
-        vhat_Rtoy =    y/R
-        vhat_phitoy =  x/R
-
-        # Excise R=0 values
-        vhat_Rtoy =   utils.replace_values_by_refarr(vhat_Rtoy, R, 0., 0.)
-        vhat_phitoy = utils.replace_values_by_refarr(vhat_phitoy, R, 0., 0.)
+        vhat_Rtoy = jnp.where(R > 0, y / R, 0.)
+        vhat_phitoy = jnp.where(R > 0, x / R, 0.)
 
         if not _save_memory:
-            vhat_Rtoz = vhat_phitoz = vhat_ztoz = vhat_ztoy = vhat_ztox = 0.*z
-            vhat_Rtox =    x/R
-            vhat_phitox = -y/R
+            vhat_Rtox = jnp.where(R > 0, x / R, 0.)
+            vhat_phitox = jnp.where(R > 0, -y / R, 0.)
 
-            # Excise R=0 values
-            vhat_Rtox =   utils.replace_values_by_refarr(vhat_Rtox, R, 0., 0.)
-            vhat_phitox = utils.replace_values_by_refarr(vhat_phitox, R, 0., 0.)
+            vhat_ztox = jnp.zeros_like(z)
+            vhat_ztoy = jnp.zeros_like(z)
+            vhat_Rtoz = jnp.zeros_like(z)
+            vhat_phitoz = jnp.zeros_like(z)
+            vhat_ztoz = jnp.zeros_like(z)
 
-            vel_dir_matrix = np.array([[vhat_Rtox, vhat_phitox, vhat_ztox],
-                                       [vhat_Rtoy, vhat_phitoy, vhat_ztoy],
-                                       [vhat_Rtoz, vhat_phitoz, vhat_ztoz]])
+            row0 = jnp.stack([vhat_Rtox, vhat_phitox, vhat_ztox], axis=0)
+            row1 = jnp.stack([vhat_Rtoy, vhat_phitoy, vhat_ztoy], axis=0)
+            row2 = jnp.stack([vhat_Rtoz, vhat_phitoz, vhat_ztoz], axis=0)
+            vel_dir_matrix = jnp.stack([row0, row1, row2], axis=0)
 
         else:
             # Only return y directions (z dir are all 0):
-            vel_dir_matrix = np.array([[0., 0., 0.],
-                                       [vhat_Rtoy, vhat_phitoy, 0.],
-                                       [0., 0., 0.]], dtype=object)
+            row0 = jnp.stack([jnp.zeros_like(R), jnp.zeros_like(R), jnp.zeros_like(R)], axis=0)
+            row1 = jnp.stack([vhat_Rtoy, vhat_phitoy, jnp.zeros_like(R)], axis=0)
+            row2 = jnp.stack([jnp.zeros_like(R), jnp.zeros_like(R), jnp.zeros_like(R)], axis=0)
+            vel_dir_matrix = jnp.stack([row0, row1, row2], axis=0)
 
         return vel_dir_matrix
