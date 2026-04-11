@@ -17,6 +17,7 @@ import pytest
 import jax
 import jax.numpy as jnp
 import scipy.special as scp_spec
+from scipy.signal import fftconvolve
 
 from dysmalpy.special import gammaincinv, hyp2f1, bessel_k0, bessel_k1
 from dysmalpy import parameters, models
@@ -26,6 +27,7 @@ from dysmalpy.models.cube_processing import (
     _make_cube_ai, _get_xyz_sky_gal, _get_xyz_sky_gal_inverse,
     _calculate_max_skyframe_extents,
 )
+from dysmalpy.convolution import _fft_convolve_3d, convolve_cube_jax, get_jax_kernels
 
 
 # ===================================================================
@@ -843,3 +845,282 @@ class TestJAXAdamSmoke:
         assert loss_final < loss_init, \
             "Loss should decrease after Adam steps: init={}, final={}".format(
                 loss_init, loss_final)
+
+
+# ===================================================================
+# 9. Phase 6: JAX FFT convolution tests
+# ===================================================================
+
+class TestFFTConvolve3D:
+    """Test JAX FFT convolution correctness against scipy."""
+
+    def test_matches_scipy_beam(self):
+        """JAX convolution matches scipy for a beam-like kernel (1, ky, kx)."""
+        np.random.seed(42)
+        cube = np.random.rand(11, 15, 15)
+        kernel = np.random.rand(1, 5, 5)
+        kernel /= kernel.sum()
+
+        expected = fftconvolve(cube, kernel, mode='same')
+        result = np.array(_fft_convolve_3d(jnp.array(cube), jnp.array(kernel)))
+        np.testing.assert_allclose(result, expected, rtol=1e-10)
+
+    def test_matches_scipy_lsf(self):
+        """JAX convolution matches scipy for an LSF-like kernel (nk, 1, 1)."""
+        np.random.seed(42)
+        cube = np.random.rand(21, 10, 10)
+        kernel = np.random.rand(7, 1, 1)
+        kernel /= kernel.sum()
+
+        expected = fftconvolve(cube, kernel, mode='same')
+        result = np.array(_fft_convolve_3d(jnp.array(cube), jnp.array(kernel)))
+        np.testing.assert_allclose(result, expected, rtol=1e-10)
+
+    def test_both_kernels(self):
+        """Sequential beam+LSF convolution matches sequential scipy."""
+        np.random.seed(42)
+        cube = np.random.rand(21, 15, 15)
+        beam = np.random.rand(1, 5, 5)
+        beam /= beam.sum()
+        lsf = np.random.rand(7, 1, 1)
+        lsf /= lsf.sum()
+
+        # Sequential scipy
+        expected = fftconvolve(cube, beam, mode='same')
+        expected = fftconvolve(expected, lsf, mode='same')
+
+        # Sequential JAX
+        result = np.array(convolve_cube_jax(jnp.array(cube),
+                                            beam_kernel=jnp.array(beam),
+                                            lsf_kernel=jnp.array(lsf)))
+
+        np.testing.assert_allclose(result, expected, rtol=1e-10)
+
+    def test_output_shape_preserved(self):
+        """Output shape equals input shape for various kernel sizes."""
+        for shape in [(11, 15, 15), (5, 7, 9), (3, 3, 3)]:
+            for kshape in [(1, 3, 3), (5, 1, 1), (3, 5, 7)]:
+                cube = np.random.rand(*shape)
+                kernel = np.random.rand(*kshape)
+                result = _fft_convolve_3d(jnp.array(cube), jnp.array(kernel))
+                assert result.shape == shape, \
+                    f"shape {shape} with kernel {kshape} gave {result.shape}"
+
+    def test_identity_kernel(self):
+        """Single-pixel kernel returns input unchanged."""
+        cube = np.random.rand(10, 12, 14)
+        kernel = np.ones((1, 1, 1))
+        result = np.array(_fft_convolve_3d(jnp.array(cube), jnp.array(kernel)))
+        np.testing.assert_allclose(result, cube, rtol=1e-10)
+
+    def test_jit_compiles(self):
+        """jax.jit(_fft_convolve_3d) works and matches unjitted."""
+        cube = jnp.array(np.random.rand(7, 9, 11))
+        kernel = jnp.array(np.random.rand(1, 3, 3))
+
+        result_unjitted = _fft_convolve_3d(cube, kernel)
+        result_jitted = jax.jit(_fft_convolve_3d)(cube, kernel)
+        np.testing.assert_allclose(
+            np.array(result_jitted), np.array(result_unjitted), rtol=1e-10)
+
+    def test_gradient(self):
+        """jax.grad through convolution produces finite values."""
+        cube = jnp.array(np.random.rand(5, 7, 9))
+        kernel = jnp.array(np.random.rand(1, 3, 3))
+
+        def fn(c):
+            return jnp.sum(_fft_convolve_3d(c, kernel))
+
+        grad_fn = jax.grad(fn)
+        grads = grad_fn(cube)
+        assert jnp.all(jnp.isfinite(grads)), \
+            "Gradients through convolution should be finite"
+
+
+class TestJAXLossWithConvolution:
+    """Integration tests for loss function with convolution."""
+
+    def test_loss_convolved_near_zero(self):
+        """Model cube convolved to create obs, loss near zero at true params."""
+        from dysmalpy.fitting.jax_loss import make_jax_loss_function
+        from dysmalpy.convolution import convolve_cube_jax
+
+        gal, obs = _make_test_galaxy_obs()
+
+        # Generate model cube
+        cube_model, _ = gal.model.simulate_cube(obs, gal.dscale)
+        cube_model = np.asarray(cube_model)
+
+        # Convolve to create "observed" data
+        beam_np, lsf_np = get_jax_kernels(obs.instrument)
+        cube_obs = np.asarray(convolve_cube_jax(
+            jnp.array(cube_model),
+            beam_kernel=jnp.array(beam_np) if beam_np is not None else None,
+            lsf_kernel=jnp.array(lsf_np) if lsf_np is not None else None,
+        ))
+
+        noise = np.ones_like(cube_obs)
+        msk = np.ones(cube_obs.shape, dtype=bool)
+
+        dscale = gal.dscale
+
+        jax_loss, get_traceable, set_all = make_jax_loss_function(
+            gal.model, obs, dscale, cube_obs, noise, mask=msk, convolve=True
+        )
+
+        theta = jnp.array(get_traceable())
+        loss_val = float(jax_loss(theta))
+        assert abs(loss_val) < 1e-3, \
+            "Convolved loss should be ~0 at true params, got {}".format(loss_val)
+
+    def test_loss_convolved_vs_unconvolved(self):
+        """Convolved loss differs from unconvolved loss."""
+        from dysmalpy.fitting.jax_loss import make_jax_loss_function
+
+        gal, obs = _make_test_galaxy_obs()
+
+        cube_model, _ = gal.model.simulate_cube(obs, gal.dscale)
+        cube_model = np.asarray(cube_model)
+
+        noise = np.ones_like(cube_model)
+        msk = np.ones(cube_model.shape, dtype=bool)
+        dscale = gal.dscale
+
+        loss_conv, _, _ = make_jax_loss_function(
+            gal.model, obs, dscale, cube_model, noise, mask=msk, convolve=True
+        )
+        loss_unconv, _, _ = make_jax_loss_function(
+            gal.model, obs, dscale, cube_model, noise, mask=msk, convolve=False
+        )
+
+        theta = jnp.array(loss_unconv.__closure__[0].__closure__[0]._identify_traceable_params_orig if False else
+                          gal.model.get_free_parameters_values())
+
+        # Simpler: just use the traceable extractor
+        from dysmalpy.fitting.jax_loss import _identify_traceable_params
+        reindexed, _, orig_idx = _identify_traceable_params(gal.model)
+        theta_traceable = jnp.array([gal.model.get_free_parameters_values()[i]
+                                     for i in orig_idx])
+
+        loss_c = float(loss_conv(theta_traceable))
+        loss_u = float(loss_unconv(theta_traceable))
+
+        # They should differ because convolution changes the model cube
+        assert abs(loss_c - loss_u) > 1e-6, \
+            "Convolved ({}) and unconvolved ({}) losses should differ".format(
+                loss_c, loss_u)
+
+    def test_loss_gradient_finite_with_convolution(self):
+        """Full pipeline gradients are finite with convolution enabled."""
+        from dysmalpy.fitting.jax_loss import make_jax_loss_function
+
+        gal, obs = _make_test_galaxy_obs()
+
+        cube_model, _ = gal.model.simulate_cube(obs, gal.dscale)
+        cube_model = np.asarray(cube_model)
+
+        noise = np.ones_like(cube_model)
+        msk = np.ones(cube_model.shape, dtype=bool)
+        dscale = gal.dscale
+
+        jax_loss, get_traceable, set_all = make_jax_loss_function(
+            gal.model, obs, dscale, cube_model, noise, mask=msk, convolve=True
+        )
+
+        theta = jnp.array(get_traceable())
+        theta = theta + 0.05  # Slight perturbation to avoid degenerate gradients
+
+        grads = jax.grad(lambda th: jax_loss(th))(theta)
+        assert jnp.all(jnp.isfinite(grads)), \
+            "All gradients should be finite with convolution, got: {}".format(grads)
+
+    def test_adam_reduces_loss_convolved(self):
+        """Adam steps reduce convolved loss."""
+        from dysmalpy.fitting.jax_loss import make_jax_loss_function
+        from dysmalpy.convolution import convolve_cube_jax
+
+        gal, obs = _make_test_galaxy_obs()
+
+        cube_model, _ = gal.model.simulate_cube(obs, gal.dscale)
+        cube_model = np.asarray(cube_model)
+
+        # Convolve to create observed data
+        beam_np, lsf_np = get_jax_kernels(obs.instrument)
+        cube_obs = np.asarray(convolve_cube_jax(
+            jnp.array(cube_model),
+            beam_kernel=jnp.array(beam_np) if beam_np is not None else None,
+            lsf_kernel=jnp.array(lsf_np) if lsf_np is not None else None,
+        ))
+
+        rng = np.random.RandomState(123)
+        cube_obs = cube_obs + rng.normal(0, 0.01, cube_obs.shape)
+        noise = np.ones_like(cube_obs)
+        msk = np.ones(cube_obs.shape, dtype=bool)
+        dscale = gal.dscale
+
+        jax_loss, get_traceable, set_all = make_jax_loss_function(
+            gal.model, obs, dscale, cube_obs, noise, mask=msk, convolve=True
+        )
+
+        loss_grad_fn = jax.jit(jax.value_and_grad(jax_loss))
+
+        theta = jnp.array(get_traceable(), dtype=jnp.float64)
+        theta = theta + 0.1  # Perturb from true values
+
+        loss_init = float(jax_loss(theta))
+
+        beta1, beta2, eps, lr = 0.9, 0.999, 1e-8, 1e-2
+        m = jnp.zeros_like(theta)
+        v = jnp.zeros_like(theta)
+
+        for i in range(10):
+            loss_val, grads = loss_grad_fn(theta)
+            m = beta1 * m + (1 - beta1) * grads
+            v = beta2 * v + (1 - beta2) * grads ** 2
+            m_hat = m / (1 - beta1 ** (i + 1))
+            v_hat = v / (1 - beta2 ** (i + 1))
+            theta = theta - lr * m_hat / (jnp.sqrt(v_hat) + eps)
+
+        loss_final = float(jax_loss(theta))
+
+        assert loss_final < loss_init, \
+            "Convolved loss should decrease: init={}, final={}".format(
+                loss_init, loss_final)
+
+
+class TestGetJAXKernels:
+    """Test kernel extraction from Instrument instances."""
+
+    def test_beam_kernel_shape(self):
+        """Extracted beam kernel has shape (1, ky, kx) and sums to ~1."""
+        gal, obs = _make_test_galaxy_obs()
+
+        beam_np, lsf_np = get_jax_kernels(obs.instrument)
+
+        assert beam_np is not None
+        assert beam_np.shape[0] == 1  # spectral dimension
+        assert beam_np.ndim == 3
+        assert np.isclose(np.sum(beam_np), 1.0, atol=1e-5)
+
+    def test_lsf_kernel_shape(self):
+        """Extracted LSF kernel has shape (nk, 1, 1) and sums to ~1."""
+        gal, obs = _make_test_galaxy_obs()
+
+        beam_np, lsf_np = get_jax_kernels(obs.instrument)
+
+        assert lsf_np is not None
+        assert lsf_np.shape[1] == 1  # y spatial
+        assert lsf_np.shape[2] == 1  # x spatial
+        assert lsf_np.ndim == 3
+        # Discretized Gaussian may sum slightly less than 1
+        assert np.isclose(np.sum(lsf_np), 1.0, atol=1e-3)
+
+    def test_no_kernels(self):
+        """Instrument with no beam/LSF returns (None, None)."""
+        from dysmalpy import instrument
+
+        inst = instrument.Instrument()
+        beam_np, lsf_np = get_jax_kernels(inst)
+
+        assert beam_np is None
+        assert lsf_np is None

@@ -145,7 +145,7 @@ class JAXAdamFitter(base.Fitter):
         # Build loss function
         jax_loss, get_traceable_theta, set_all_theta = make_jax_loss_function(
             gal.model, obs, dscale, cube_obs, noise,
-            mask=msk, weight=weight,
+            mask=msk, weight=weight, convolve=True,
         )
 
         # JIT-compile loss + gradient

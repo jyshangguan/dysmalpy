@@ -92,6 +92,56 @@ Converted all model computation files to use `jnp`:
 | `models/utils.py` | `replace_values_by_refarr` now uses `jnp.where`, `get_geom_phi_rad_polar` uses `jnp` |
 | `models/model_set.py` | `vcirc_sq()` uses `jnp.zeros_like`, `velocity_profile()` uses `jnp.sqrt`, `rgal` uses `jnp.sqrt`, `replace_values_by_refarr` calls replaced with `jnp.where` |
 
+### Phase 5: JAX-Accelerated Fitting
+
+Strategy: JAX tracer injection into existing parameter storage (same as reference implementation at `dysmalpy-jax/`). Instead of refactoring the parameter system to be immutable, create a closure `jax_loss(theta)` that directly sets `_param_value_*` attributes to JAX tracers, bypassing `__setattr__` which calls `float()`.
+
+Steps completed:
+1. Added `get_param_storage_names()` to ModelSet — returns `(comp_name, param_name) -> theta_index` mapping
+2. Created `dysmalpy/fitting/jax_loss.py` — `make_jax_loss_function()` factory using `object.__setattr__` for tracer injection
+3. Created `dysmalpy/fitting/jax_optimize.py` — `JAXAdamFitter` class with `jax.value_and_grad` + Adam
+4. Added `make_jax_log_prob_function()` — wraps loss with JAX-traceable prior computation
+5. 9 Phase 5 tests in `tests/test_jax.py` (all pass, including Adam smoke test)
+
+Geometry parameters (inc, pa, xshift, yshift) are excluded from JAX tracing since they affect array shapes.
+
+Additional fixes during Phase 5:
+- Fixed `v_circular()` in `base.py`: `jnp.where(r > 0, G*mass/r, 0.)` → `jnp.where(r > 0, G*mass/jnp.maximum(r, 1e-10), 0.)` to prevent NaN gradients from division by zero at r=0
+- Changed `simulate_cube()` to return JAX arrays (replaced `np.zeros` → `jnp.zeros`, removed `np.asarray()` wrappers on `populate_cube_jax` output)
+- Converted `zheight.py`: `np.exp` → `jnp.exp`
+- Converted `dispersion_profiles.py`: `np.ones` → `jnp.ones`
+- Added `np.asarray()` in `observation.py` after `simulate_cube()` call for numpy compatibility
+- Fixed `_make_cube_ai` JIT issue: pre-compute sparse index array `ai` before tracing, pass via `simulate_cube(ai_precomputed=...)`
+
+### Phase 6: JAX FFT Convolution
+
+Created JAX-native FFT convolution so the full pipeline `theta -> simulate_cube() -> convolve -> chi^2` is JIT-compilable on GPU, eliminating CPU-GPU round-trips during fitting.
+
+Steps completed:
+1. Created `dysmalpy/convolution.py` with three functions:
+   - `_fft_convolve_3d(cube, kernel)` — JAX-traceable 3D FFT convolution replicating `scipy.signal.fftconvolve(mode='same')`. Uses `jax.lax.pad` for zero-padding (avoids `jnp.pad` compatibility issues with certain JAX/numpy version combinations under autodiff), `jnp.fft.fftn/ifftn` for the transform, and `jax.lax.slice` for cropping to 'same' size.
+   - `convolve_cube_jax(cube, beam_kernel=None, lsf_kernel=None)` — High-level wrapper applying beam then LSF sequentially (matching `instrument.py` convention).
+   - `get_jax_kernels(instrument)` — Extracts pre-computed numpy kernels from an `Instrument` instance, calling `set_beam_kernel()`/`set_lsf_kernel()` if needed.
+2. Modified `dysmalpy/fitting/jax_loss.py`:
+   - Added `convolve=False` parameter to both `make_jax_loss_function()` and `make_jax_log_prob_function()`.
+   - When `convolve=True`, extracts kernels via `get_jax_kernels(obs.instrument)`, stores as `jnp.asarray()` constants in the closure, and applies `convolve_cube_jax()` after `simulate_cube()` before computing chi-squared.
+   - Backward compatible: `convolve=False` (default) skips convolution entirely.
+3. Modified `dysmalpy/fitting/jax_optimize.py`:
+   - `JAXAdamFitter.fit()` now passes `convolve=True` to `make_jax_loss_function()`.
+4. Added 14 Phase 6 tests in `tests/test_jax.py`:
+   - `TestFFTConvolve3D` (7 tests): Matches scipy for beam/LSF kernels, sequential both-kernel test, output shape preservation, identity kernel, JIT compilation, gradient through convolution.
+   - `TestJAXLossWithConvolution` (4 tests): Convolved loss near zero at true params, convolved vs unconvolved differ, gradient finite with convolution, Adam reduces convolved loss.
+   - `TestGetJAXKernels` (3 tests): Beam kernel shape and normalization, LSF kernel shape and normalization, no-kernels returns (None, None).
+
+Numerical accuracy: JAX FFT convolution matches `scipy.signal.fftconvolve` to `rtol=1e-10` (float64).
+Gradient check: `jax.grad` through full pipeline (simulate + convolve + chi^2) produces finite values.
+
+Files NOT changed:
+- `dysmalpy/instrument.py` — existing scipy convolution preserved for non-JAX pipeline
+- `dysmalpy/observation.py` — existing `create_single_obs_model_data()` pipeline unchanged
+- `dysmalpy/utils.py` — astropy smoothing unchanged (not in fitting loop)
+- `dysmalpy/fitting_wrappers/utils_calcs.py` — preprocessing unchanged
+
 ---
 
 ## File Change Summary
@@ -103,6 +153,7 @@ Converted all model computation files to use `jnp`:
 | `dysmalpy/special/bessel.py` | **New** | Modified Bessel K0/K1 (JAX-traceable) |
 | `dysmalpy/special/hyp2f1.py` | **New** | Gauss hypergeometric 2F1 (JAX-traceable) |
 | `dysmalpy/models/cube_processing.py` | **New** | JAX cube population functions |
+| `dysmalpy/convolution.py` | **New** | JAX FFT convolution: `_fft_convolve_3d`, `convolve_cube_jax`, `get_jax_kernels` |
 | `dysmalpy/fitting/jax_loss.py` | **New** | `make_jax_loss_function`, `make_jax_log_prob_function`, `_precompute_cube_ai` |
 | `dysmalpy/fitting/jax_optimize.py` | **New** | `JAXAdamFitter`, `JAXAdamResults` |
 | `dysmalpy/parameters.py` | Modified | Standalone DysmalParameter descriptor |
@@ -125,7 +176,7 @@ Converted all model computation files to use `jnp`:
 | `dysmalpy/utils_io.py` | Modified | np.NaN → np.nan |
 | `dysmalpy/fitting_wrappers/data_io.py` | Modified | np.NaN → np.nan |
 | `tests/conftest.py` | **New** | JAX float64 configuration |
-| `tests/test_jax.py` | **New** | 46 JAX-specific unit tests (incl. Phase 5 loss/log-prob/Adam) |
+| `tests/test_jax.py` | **New** | 60 JAX-specific unit tests (incl. Phase 5 loss/log-prob/Adam, Phase 6 convolution) |
 | `tests/test_models.py` | Modified | np.NaN → np.nan |
 
 ---
@@ -134,43 +185,25 @@ Converted all model computation files to use `jnp`:
 
 ### High Priority
 
-(None)
+- [ ] **JAX rebin step**: `simulate_cube()` returns a cube at oversampled resolution. The observed data is at native resolution. A JAX-compatible rebin step is needed to make convolution work end-to-end at native resolution (currently convolution operates at oversampled resolution).
 
 ### Medium Priority
 
 - [ ] **Benchmark**: Compare timing of old Cython vs new JAX cube population on GPU
-
-### Phase 5: JAX-Accelerated Fitting [DONE]
-
-Strategy: JAX tracer injection into existing parameter storage (same as reference implementation at `dysmalpy-jax/`). Instead of refactoring the parameter system to be immutable, create a closure `jax_loss(theta)` that directly sets `_param_value_*` attributes to JAX tracers, bypassing `__setattr__` which calls `float()`.
-
-Steps completed:
-1. Added `get_param_storage_names()` to ModelSet — returns `(comp_name, param_name) -> theta_index` mapping
-2. Created `dysmalpy/fitting/jax_loss.py` — `make_jax_loss_function()` factory using `object.__setattr__` for tracer injection
-3. Created `dysmalpy/fitting/jax_optimize.py` — `JAXAdamFitter` class with `jax.value_and_grad` + Adam
-4. Added `make_jax_log_prob_function()` — wraps loss with JAX-traceable prior computation
-5. 9 Phase 5 tests in `tests/test_jax.py` (all pass, including Adam smoke test)
-
-Geometry parameters (inc, pa, xshift, yshift) are excluded from JAX tracing since they affect array shapes.
-
-Additional fixes during Phase 5:
-- Fixed `v_circular()` in `base.py`: `jnp.where(r > 0, G*mass/r, 0.)` → `jnp.where(r > 0, G*mass/jnp.maximum(r, 1e-10), 0.)` to prevent NaN gradients from division by zero at r=0
-- Changed `simulate_cube()` to return JAX arrays (replaced `np.zeros` → `jnp.zeros`, removed `np.asarray()` wrappers on `populate_cube_jax` output)
-- Converted `zheight.py`: `np.exp` → `jnp.exp`
-- Converted `dispersion_profiles.py`: `np.ones` → `jnp.ones`
-- Added `np.asarray()` in `observation.py` after `simulate_cube()` call for numpy compatibility
-- Fixed `_make_cube_ai` JIT issue: pre-compute sparse index array `ai` before tracing, pass via `simulate_cube(ai_precomputed=...)`
+- [ ] **Benchmark convolution**: Measure speedup of JAX FFT convolution vs scipy.fftconvolve on GPU for typical cube sizes
+- [ ] **Convolution in MCMC/NestedSampling**: Add `convolve=True` support to `jax_nested_sampling.py` and `jax_mcmc.py` (future fitters)
 
 ### Low Priority
 
-- [ ] **Phase 6 (Optional): JAX FFT convolution** — Replace `astropy.convolution` with `jnp.fft`-based PSF/LSF convolution
 - [ ] **Remove unused imports**: Clean up any remaining `import numpy as np` in files that only use `jnp`
 - [ ] **Verify pickle compatibility** of new DysmalParameter-based models for MCMC chain serialization
 - [ ] **Fix `np.inf` in parameter defaults**: `light_distributions.py` uses `np.inf` — should work but may cause JAX tracing issues
+- [ ] **Oversampling-aware convolution**: Convolve at native resolution after rebinning, rather than at oversampled resolution
 
 ### Completed (was TODO, now done)
 
-- [x] **Fix `_make_cube_ai` for JIT**: The sparse index array `ai` used by `populate_cube_jax_ais` depends on coordinate arrays that become JAX tracers under `jax.jit`. Fix: pre-compute `ai` with concrete values before JIT compilation in `jax_loss.py:_precompute_cube_ai()`, then pass it to `simulate_cube(ai_precomputed=...)`. Added `ai_precomputed` and `ai_sky_precomputed` optional parameters to `simulate_cube()`. All 73 tests now pass with zero xfails.
+- [x] **Phase 6: JAX FFT convolution** — Created `dysmalpy/convolution.py` with `_fft_convolve_3d`, `convolve_cube_jax`, `get_jax_kernels`. Added `convolve` parameter to loss/log-prob functions. `JAXAdamFitter` now passes `convolve=True`. 14 new tests, all pass. Numerical accuracy matches scipy to `rtol=1e-10` (float64).
+- [x] **Fix `_make_cube_ai` for JIT**: The sparse index array `ai` used by `populate_cube_jax_ais` depends on coordinate arrays that become JAX tracers under `jax.jit`. Fix: pre-compute `ai` with concrete values before JIT compilation in `jax_loss.py:_precompute_cube_ai()`, then pass it to `simulate_cube(ai_precomputed=...)`. Added `ai_precomputed` and `ai_sky_precomputed` optional parameters to `simulate_cube()`.
 - [x] **Complete kinematic_options.py conversion** (Phase 4 final piece): Replaced all remaining scipy dependencies with JAX-compatible implementations:
   - `scipy.optimize.newton` → JAX secant solver via `jax.lax.scan` (`_solve_adiabatic_sq`)
   - `scipy.interpolate.interp1d` → `_interp1d_extrap()` using `jnp.interp` with manual linear extrapolation via `jnp.where`
@@ -179,7 +212,7 @@ Additional fixes during Phase 5:
   - Key design decision: The secant solver evaluates the residual function using `interp(rprime, r1d, sqrt(vhalo_sq))` then squares the result, matching the original scipy behavior exactly. Using `interp(rprime, r1d, vhalo_sq)` directly gives different results when extrapolating because `(sqrt(extrap))^2 ≠ extrap(sqrt(y))` for linear extrapolation.
   - Added `import jax` for `jax.lax.scan`
 - [x] **Force float64**: `tests/conftest.py` sets `jax.config.update("jax_enable_x64", True)` before all tests
-- [x] **All 73 tests pass**: 27 existing tests + 46 JAX-specific tests all pass (zero xfails)
+- [x] **All 87 tests pass**: 27 existing tests + 60 JAX-specific tests all pass (zero xfails)
 - [x] **np.NaN → np.nan**: Fixed NumPy 2.0 compatibility across all files (19 files)
 - [x] **DysmalParameter returns descriptor from `__get__`**: Changed `__get__` to return `self` (the descriptor) instead of the value, enabling `model.param.prior = ...` pattern. Added numeric dunder methods (`__float__`, `__eq__`, `__add__`, `__jax_array__`, etc.) so the descriptor acts as a numeric proxy.
 - [x] **Added `__call__` to all models with `@staticmethod evaluate()`**: Geometry, DispersionConst, ZHeightGauss, ZHeightExp, Sersic, ExpDisk, DiskBulge, LinearDiskBulge, GaussianRing, BlackHole, all extinction models, all light distribution models, and most higher-order kinematics models now have explicit `__call__` that injects parameter values.
@@ -198,6 +231,8 @@ Additional fixes during Phase 5:
 
 3. **DysmalParameter descriptor aliasing**: Any code that stores `self.some_param` (a DysmalParameter descriptor) in another object's attribute will create a shared reference. Changes to the parameter value will silently affect both objects. Always use `float(self.some_param)` when storing parameter values in non-DysmalParameter containers. (This was the root cause of the NoordFlat bug.)
 
+4. **`jnp.pad` compatibility**: `jnp.pad` with `mode='constant'` has a `copy` keyword argument incompatibility between JAX 0.9.x and NumPy 2.x. Workaround: use `jax.lax.pad` directly (as done in `convolution.py:_fft_convolve_3d`).
+
 ---
 
 ## Testing
@@ -213,15 +248,16 @@ All 27 existing tests pass:
 - All `test_fitting_wrapper_model_*` — end-to-end fitting wrapper (10 tests)
 
 ### New JAX-specific tests (`tests/test_jax.py`)
-46 tests covering:
-- Special functions against scipy reference values
-- DysmalParameter descriptor behavior
-- Cube population correctness
-- Geometry transforms
-- Model computations (NFW, Sersic, DiskBulge, TwoPowerHalo)
-- Utility functions
-- Cube helpers
-- Phase 5: Loss function correctness, gradient computation, log-prob function, Adam optimizer smoke test (all pass)
+60 tests covering:
+- Special functions against scipy reference values (4+4+3 tests)
+- DysmalParameter descriptor behavior (5 tests)
+- Cube population correctness (4 tests)
+- Geometry transforms (3 tests)
+- Model computations — NFW, Sersic, DiskBulge, TwoPowerHalo (4+3+2+2 tests)
+- Utility functions (2 tests)
+- Cube helpers (2 tests)
+- Phase 5: Loss function correctness, gradient computation, log-prob function, Adam optimizer smoke test (5+2+1 tests)
+- Phase 6: FFT convolution against scipy, JIT compilation, gradients; loss with convolution integration; kernel extraction (7+4+3 tests)
 
 See `tests/test_jax.py` for details.
 
@@ -239,8 +275,8 @@ Phase 1 (DysmalParameter) ──┐    │
                              │                    │
                              │                    └─> Phase 5 (JAX fitting)  [DONE]
                              │                             │
-                             │                             └─> Phase 6 (convolution)  [TODO]
+                             │                             └─> Phase 6 (convolution)  [DONE]
 ```
 
-*Phase 4 complete — all scipy dependencies removed from kinematic_options.py
-*Phase 5 complete — loss function, log-prob, Adam optimizer all working. All 73 tests pass with zero xfails.
+*Phase 0-6 complete — full JAX pipeline from theta -> simulate_cube -> convolve -> chi^2 is JIT-compilable.*
+*All 87 tests pass (27 existing + 60 JAX-specific) with zero xfails.*

@@ -175,7 +175,7 @@ def _identify_traceable_params(model_set):
 
 
 def make_jax_loss_function(model_set, obs, dscale, cube_obs, noise,
-                           mask=None, weight=1.0):
+                           mask=None, weight=1.0, convolve=False):
     """Return a JAX-traceable chi-squared loss function.
 
     The returned function sets model parameter storage attributes directly
@@ -199,6 +199,10 @@ def make_jax_loss_function(model_set, obs, dscale, cube_obs, noise,
         Boolean mask. Only unmasked pixels contribute to chi-squared.
     weight : float
         Observation weight.
+    convolve : bool
+        If True, apply PSF/LSF convolution to the model cube before
+        computing chi-squared.  Requires ``obs.instrument`` to have
+        beam and/or LSF kernels available.
 
     Returns
     -------
@@ -230,6 +234,19 @@ def make_jax_loss_function(model_set, obs, dscale, cube_obs, noise,
         ai_precomputed = _ai_precomputed.get('ai')
         ai_sky_precomputed = _ai_precomputed.get('ai_sky')
 
+    # Extract convolution kernels if requested
+    _beam_kernel_jax = None
+    _lsf_kernel_jax = None
+    if convolve and obs.instrument is not None:
+        from dysmalpy.convolution import get_jax_kernels, convolve_cube_jax
+        beam_np, lsf_np = get_jax_kernels(obs.instrument)
+        if beam_np is not None:
+            _beam_kernel_jax = jnp.asarray(beam_np)
+        if lsf_np is not None:
+            _lsf_kernel_jax = jnp.asarray(lsf_np)
+
+    _do_convolve = (_beam_kernel_jax is not None or _lsf_kernel_jax is not None)
+
     def _inject_tracers(theta_traceable):
         """Inject JAX tracer values into model parameter storage."""
         for (cmp_name, param_name), theta_idx in reindexed:
@@ -243,6 +260,11 @@ def make_jax_loss_function(model_set, obs, dscale, cube_obs, noise,
         cube_model, _ = model_set.simulate_cube(obs, dscale,
                                                  ai_precomputed=ai_precomputed,
                                                  ai_sky_precomputed=ai_sky_precomputed)
+
+        if _do_convolve:
+            cube_model = convolve_cube_jax(cube_model,
+                                           beam_kernel=_beam_kernel_jax,
+                                           lsf_kernel=_lsf_kernel_jax)
 
         if mask_jax is not None:
             chi_sq = jnp.sum(
@@ -320,7 +342,7 @@ def _jax_log_prior(theta_traceable, model_set, reindexed):
 
 
 def make_jax_log_prob_function(model_set, obs, dscale, cube_obs, noise,
-                               mask=None, weight=1.0):
+                               mask=None, weight=1.0, convolve=False):
     """Return a JAX-traceable log-posterior function.
 
     Parameters
@@ -332,6 +354,9 @@ def make_jax_log_prob_function(model_set, obs, dscale, cube_obs, noise,
     noise : array-like
     mask : array-like or None
     weight : float
+    convolve : bool
+        If True, apply PSF/LSF convolution to the model cube before
+        computing chi-squared.
 
     Returns
     -------
@@ -349,6 +374,19 @@ def make_jax_log_prob_function(model_set, obs, dscale, cube_obs, noise,
 
     reindexed, n_traceable, orig_theta_indices = _identify_traceable_params(model_set)
 
+    # Extract convolution kernels if requested
+    _beam_kernel_jax = None
+    _lsf_kernel_jax = None
+    if convolve and obs.instrument is not None:
+        from dysmalpy.convolution import get_jax_kernels, convolve_cube_jax
+        beam_np, lsf_np = get_jax_kernels(obs.instrument)
+        if beam_np is not None:
+            _beam_kernel_jax = jnp.asarray(beam_np)
+        if lsf_np is not None:
+            _lsf_kernel_jax = jnp.asarray(lsf_np)
+
+    _do_convolve = (_beam_kernel_jax is not None or _lsf_kernel_jax is not None)
+
     def _inject_tracers(theta_traceable):
         for (cmp_name, param_name), theta_idx in reindexed:
             comp = model_set.components[cmp_name]
@@ -363,6 +401,11 @@ def make_jax_log_prob_function(model_set, obs, dscale, cube_obs, noise,
         # via jnp.where at the end)
         _inject_tracers(theta_traceable)
         cube_model, _ = model_set.simulate_cube(obs, dscale)
+
+        if _do_convolve:
+            cube_model = convolve_cube_jax(cube_model,
+                                           beam_kernel=_beam_kernel_jax,
+                                           lsf_kernel=_lsf_kernel_jax)
 
         if mask_jax is not None:
             chi_sq = jnp.sum(
