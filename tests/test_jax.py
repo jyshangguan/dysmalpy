@@ -27,7 +27,7 @@ from dysmalpy.models.cube_processing import (
     _make_cube_ai, _get_xyz_sky_gal, _get_xyz_sky_gal_inverse,
     _calculate_max_skyframe_extents,
 )
-from dysmalpy.convolution import _fft_convolve_3d, convolve_cube_jax, get_jax_kernels
+from dysmalpy.convolution import _fft_convolve_3d, convolve_cube_jax, get_jax_kernels, _rebin_spatial
 
 
 # ===================================================================
@@ -605,12 +605,24 @@ def _make_test_galaxy_obs():
     return gal, obs
 
 
+def _make_test_galaxy_obs_native():
+    """Build a test galaxy + observation with oversample=1.
+
+    This produces simulate_cube output at native resolution, matching the
+    observed data shape directly (no rebin needed).  Used by Phase 5
+    tests that don't test the rebin step.
+    """
+    gal, obs = _make_test_galaxy_obs()
+    obs.mod_options.oversample = 1
+    return gal, obs
+
+
 class TestJAXLossFunction:
     """Test make_jax_loss_function and related utilities."""
 
     def test_param_storage_names(self):
         """ModelSet.get_param_storage_names returns correct mapping."""
-        gal, obs = _make_test_galaxy_obs()
+        gal, obs = _make_test_galaxy_obs_native()
         pmap = gal.model.get_param_storage_names()
 
         assert len(pmap) > 0
@@ -624,7 +636,7 @@ class TestJAXLossFunction:
         """Geometry params are excluded from traceable set."""
         from dysmalpy.fitting.jax_loss import _identify_traceable_params
 
-        gal, obs = _make_test_galaxy_obs()
+        gal, obs = _make_test_galaxy_obs_native()
         reindexed, n_traceable, orig_idx = _identify_traceable_params(gal.model)
 
         # Geometry params (inc, pa, xshift, yshift) should be excluded
@@ -640,7 +652,7 @@ class TestJAXLossFunction:
         """JAX loss function produces same chi-squared as manual computation."""
         from dysmalpy.fitting.jax_loss import make_jax_loss_function
 
-        gal, obs = _make_test_galaxy_obs()
+        gal, obs = _make_test_galaxy_obs_native()
 
         # Generate model cube using simulate_cube directly
         cube_model, _ = gal.model.simulate_cube(obs, gal.dscale)
@@ -666,7 +678,7 @@ class TestJAXLossFunction:
         """Perturbed parameters produce higher loss than true parameters."""
         from dysmalpy.fitting.jax_loss import make_jax_loss_function
 
-        gal, obs = _make_test_galaxy_obs()
+        gal, obs = _make_test_galaxy_obs_native()
 
         cube_model, _ = gal.model.simulate_cube(obs, gal.dscale)
         cube_model = np.asarray(cube_model)
@@ -695,7 +707,7 @@ class TestJAXLossFunction:
         """jax.grad of the loss function produces finite gradients."""
         from dysmalpy.fitting.jax_loss import make_jax_loss_function
 
-        gal, obs = _make_test_galaxy_obs()
+        gal, obs = _make_test_galaxy_obs_native()
 
         cube_model, _ = gal.model.simulate_cube(obs, gal.dscale)
         cube_model = np.asarray(cube_model)
@@ -723,7 +735,7 @@ class TestJAXLossFunction:
         """Adding noise to data increases loss above zero."""
         from dysmalpy.fitting.jax_loss import make_jax_loss_function
 
-        gal, obs = _make_test_galaxy_obs()
+        gal, obs = _make_test_galaxy_obs_native()
 
         cube_model, _ = gal.model.simulate_cube(obs, gal.dscale)
         cube_model = np.asarray(cube_model)
@@ -754,7 +766,7 @@ class TestJAXLogProbFunction:
         """Log-prob is finite at true parameters (data = model)."""
         from dysmalpy.fitting.jax_loss import make_jax_log_prob_function
 
-        gal, obs = _make_test_galaxy_obs()
+        gal, obs = _make_test_galaxy_obs_native()
 
         cube_model, _ = gal.model.simulate_cube(obs, gal.dscale)
         cube_model = np.asarray(cube_model)
@@ -775,7 +787,7 @@ class TestJAXLogProbFunction:
         """Log-prob returns -inf for out-of-bounds parameters."""
         from dysmalpy.fitting.jax_loss import make_jax_log_prob_function
 
-        gal, obs = _make_test_galaxy_obs()
+        gal, obs = _make_test_galaxy_obs_native()
 
         cube_model, _ = gal.model.simulate_cube(obs, gal.dscale)
         cube_model = np.asarray(cube_model)
@@ -803,7 +815,7 @@ class TestJAXAdamSmoke:
         """Adam optimizer reduces loss from initial value in a few steps."""
         from dysmalpy.fitting.jax_loss import make_jax_loss_function
 
-        gal, obs = _make_test_galaxy_obs()
+        gal, obs = _make_test_galaxy_obs_native()
 
         cube_model, _ = gal.model.simulate_cube(obs, gal.dscale)
         cube_model = np.asarray(cube_model)
@@ -941,23 +953,40 @@ class TestJAXLossWithConvolution:
     """Integration tests for loss function with convolution."""
 
     def test_loss_convolved_near_zero(self):
-        """Model cube convolved to create obs, loss near zero at true params."""
+        """Model cube rebin+convolved to create obs, loss near zero at true params."""
         from dysmalpy.fitting.jax_loss import make_jax_loss_function
-        from dysmalpy.convolution import convolve_cube_jax
 
         gal, obs = _make_test_galaxy_obs()
 
-        # Generate model cube
+        # Generate model cube (oversampled)
         cube_model, _ = gal.model.simulate_cube(obs, gal.dscale)
         cube_model = np.asarray(cube_model)
 
-        # Convolve to create "observed" data
+        # Rebin then convolve to create "observed" data at native resolution
+        oversample = obs.mod_options.oversample
+        oversize = obs.mod_options.oversize
+        nx_sky = obs.instrument.fov[0]
+        ny_sky = obs.instrument.fov[1]
+
+        if oversample > 1:
+            cube_rebinned = np.asarray(_rebin_spatial(
+                jnp.array(cube_model), ny_sky * oversize, nx_sky * oversize))
+        else:
+            cube_rebinned = cube_model
+
         beam_np, lsf_np = get_jax_kernels(obs.instrument)
         cube_obs = np.asarray(convolve_cube_jax(
-            jnp.array(cube_model),
+            jnp.array(cube_rebinned),
             beam_kernel=jnp.array(beam_np) if beam_np is not None else None,
             lsf_kernel=jnp.array(lsf_np) if lsf_np is not None else None,
         ))
+
+        # Crop if oversize > 1
+        if oversize > 1:
+            y_start = (cube_obs.shape[1] - ny_sky) // 2
+            x_start = (cube_obs.shape[2] - nx_sky) // 2
+            cube_obs = cube_obs[:, y_start:y_start+ny_sky,
+                                 x_start:x_start+nx_sky]
 
         noise = np.ones_like(cube_obs)
         msk = np.ones(cube_obs.shape, dtype=bool)
@@ -982,21 +1011,30 @@ class TestJAXLossWithConvolution:
         cube_model, _ = gal.model.simulate_cube(obs, gal.dscale)
         cube_model = np.asarray(cube_model)
 
-        noise = np.ones_like(cube_model)
-        msk = np.ones(cube_model.shape, dtype=bool)
+        # Rebin to native resolution for fake obs (matching what the loss
+        # function does internally)
+        oversample = obs.mod_options.oversample
+        oversize = obs.mod_options.oversize
+        nx_sky = obs.instrument.fov[0]
+        ny_sky = obs.instrument.fov[1]
+        if oversample > 1:
+            cube_native = np.asarray(_rebin_spatial(
+                jnp.array(cube_model), ny_sky * oversize, nx_sky * oversize))
+        else:
+            cube_native = cube_model
+
+        noise = np.ones_like(cube_native)
+        msk = np.ones(cube_native.shape, dtype=bool)
         dscale = gal.dscale
 
         loss_conv, _, _ = make_jax_loss_function(
-            gal.model, obs, dscale, cube_model, noise, mask=msk, convolve=True
+            gal.model, obs, dscale, cube_native, noise, mask=msk, convolve=True
         )
         loss_unconv, _, _ = make_jax_loss_function(
-            gal.model, obs, dscale, cube_model, noise, mask=msk, convolve=False
+            gal.model, obs, dscale, cube_native, noise, mask=msk, convolve=False
         )
 
-        theta = jnp.array(loss_unconv.__closure__[0].__closure__[0]._identify_traceable_params_orig if False else
-                          gal.model.get_free_parameters_values())
-
-        # Simpler: just use the traceable extractor
+        # Use the traceable extractor
         from dysmalpy.fitting.jax_loss import _identify_traceable_params
         reindexed, _, orig_idx = _identify_traceable_params(gal.model)
         theta_traceable = jnp.array([gal.model.get_free_parameters_values()[i]
@@ -1019,12 +1057,23 @@ class TestJAXLossWithConvolution:
         cube_model, _ = gal.model.simulate_cube(obs, gal.dscale)
         cube_model = np.asarray(cube_model)
 
-        noise = np.ones_like(cube_model)
-        msk = np.ones(cube_model.shape, dtype=bool)
+        # Rebin to native resolution for fake obs
+        oversample = obs.mod_options.oversample
+        oversize = obs.mod_options.oversize
+        nx_sky = obs.instrument.fov[0]
+        ny_sky = obs.instrument.fov[1]
+        if oversample > 1:
+            cube_native = np.asarray(_rebin_spatial(
+                jnp.array(cube_model), ny_sky * oversize, nx_sky * oversize))
+        else:
+            cube_native = cube_model
+
+        noise = np.ones_like(cube_native)
+        msk = np.ones(cube_native.shape, dtype=bool)
         dscale = gal.dscale
 
         jax_loss, get_traceable, set_all = make_jax_loss_function(
-            gal.model, obs, dscale, cube_model, noise, mask=msk, convolve=True
+            gal.model, obs, dscale, cube_native, noise, mask=msk, convolve=True
         )
 
         theta = jnp.array(get_traceable())
@@ -1037,20 +1086,36 @@ class TestJAXLossWithConvolution:
     def test_adam_reduces_loss_convolved(self):
         """Adam steps reduce convolved loss."""
         from dysmalpy.fitting.jax_loss import make_jax_loss_function
-        from dysmalpy.convolution import convolve_cube_jax
 
         gal, obs = _make_test_galaxy_obs()
 
         cube_model, _ = gal.model.simulate_cube(obs, gal.dscale)
         cube_model = np.asarray(cube_model)
 
-        # Convolve to create observed data
+        # Rebin then convolve to create observed data
+        oversample = obs.mod_options.oversample
+        oversize = obs.mod_options.oversize
+        nx_sky = obs.instrument.fov[0]
+        ny_sky = obs.instrument.fov[1]
+
+        if oversample > 1:
+            cube_rebinned = np.asarray(_rebin_spatial(
+                jnp.array(cube_model), ny_sky * oversize, nx_sky * oversize))
+        else:
+            cube_rebinned = cube_model
+
         beam_np, lsf_np = get_jax_kernels(obs.instrument)
         cube_obs = np.asarray(convolve_cube_jax(
-            jnp.array(cube_model),
+            jnp.array(cube_rebinned),
             beam_kernel=jnp.array(beam_np) if beam_np is not None else None,
             lsf_kernel=jnp.array(lsf_np) if lsf_np is not None else None,
         ))
+
+        if oversize > 1:
+            y_start = (cube_obs.shape[1] - ny_sky) // 2
+            x_start = (cube_obs.shape[2] - nx_sky) // 2
+            cube_obs = cube_obs[:, y_start:y_start+ny_sky,
+                                 x_start:x_start+nx_sky]
 
         rng = np.random.RandomState(123)
         cube_obs = cube_obs + rng.normal(0, 0.01, cube_obs.shape)
@@ -1093,7 +1158,7 @@ class TestGetJAXKernels:
 
     def test_beam_kernel_shape(self):
         """Extracted beam kernel has shape (1, ky, kx) and sums to ~1."""
-        gal, obs = _make_test_galaxy_obs()
+        gal, obs = _make_test_galaxy_obs_native()
 
         beam_np, lsf_np = get_jax_kernels(obs.instrument)
 
@@ -1104,7 +1169,7 @@ class TestGetJAXKernels:
 
     def test_lsf_kernel_shape(self):
         """Extracted LSF kernel has shape (nk, 1, 1) and sums to ~1."""
-        gal, obs = _make_test_galaxy_obs()
+        gal, obs = _make_test_galaxy_obs_native()
 
         beam_np, lsf_np = get_jax_kernels(obs.instrument)
 
@@ -1124,3 +1189,219 @@ class TestGetJAXKernels:
 
         assert beam_np is None
         assert lsf_np is None
+
+
+# ===================================================================
+# 10. Phase 7: JAX rebin tests
+# ===================================================================
+
+class TestRebinSpatial:
+    """Test JAX spatial rebin against numpy reference."""
+
+    def test_rebin_matches_numpy(self):
+        """_rebin_spatial matches dysmalpy.utils.rebin to machine precision."""
+        from dysmalpy.utils import rebin as np_rebin
+
+        np.random.seed(42)
+        cube = np.random.rand(11, 15, 15)
+        new_ny, new_nx = 5, 5
+
+        expected = np_rebin(cube, (new_ny, new_nx))
+        result = np.array(_rebin_spatial(jnp.array(cube), new_ny, new_nx))
+
+        np.testing.assert_allclose(result, expected, rtol=1e-12)
+
+    def test_rebin_matches_numpy_nonsquare(self):
+        """Rebin with non-square target matches numpy."""
+        from dysmalpy.utils import rebin as np_rebin
+
+        np.random.seed(99)
+        cube = np.random.rand(7, 12, 18)
+        new_ny, new_nx = 4, 6
+
+        expected = np_rebin(cube, (new_ny, new_nx))
+        result = np.array(_rebin_spatial(jnp.array(cube), new_ny, new_nx))
+
+        np.testing.assert_allclose(result, expected, rtol=1e-12)
+
+    def test_rebin_jit_compiles(self):
+        """jax.jit(_rebin_spatial) works and matches unjitted."""
+        np.random.seed(7)
+        cube = jnp.array(np.random.rand(5, 9, 12))
+
+        result_unjitted = _rebin_spatial(cube, 3, 4)
+        result_jitted = jax.jit(lambda c: _rebin_spatial(c, 3, 4))(cube)
+        np.testing.assert_allclose(
+            np.array(result_jitted), np.array(result_unjitted), rtol=1e-12)
+
+    def test_rebin_identity(self):
+        """oversample=1 (new_ny=ny_in, new_nx=nx_in) returns same cube."""
+        np.random.seed(3)
+        cube = np.random.rand(5, 8, 8)
+        result = np.array(_rebin_spatial(jnp.array(cube), 8, 8))
+        np.testing.assert_allclose(result, cube, rtol=1e-12)
+
+    def test_rebin_gradient(self):
+        """jax.grad through rebin produces finite values."""
+        cube = jnp.array(np.random.rand(3, 6, 6))
+
+        def fn(c):
+            return jnp.sum(_rebin_spatial(c, 2, 2))
+
+        grads = jax.grad(fn)(cube)
+        assert jnp.all(jnp.isfinite(grads)), \
+            "Gradients through rebin should be finite"
+
+    def test_rebin_output_shape(self):
+        """Output shape is (nz, new_ny, new_nx)."""
+        cube = jnp.array(np.random.rand(10, 15, 21))
+        result = _rebin_spatial(cube, 5, 7)
+        assert result.shape == (10, 5, 7)
+
+
+class TestFullPipelineRebinConvolveCrop:
+    """Test the full simulate -> rebin -> convolve -> crop pipeline."""
+
+    def test_rebin_convolve_matches_numpy_pipeline(self):
+        """Rebin+convolve+crop in JAX matches the numpy observation pipeline."""
+        from dysmalpy.utils import rebin as np_rebin
+
+        gal, obs = _make_test_galaxy_obs()
+        dscale = gal.dscale
+
+        # Simulate at oversampled resolution
+        cube_model, _ = gal.model.simulate_cube(obs, dscale)
+        cube_model = np.asarray(cube_model)
+
+        oversample = obs.mod_options.oversample
+        oversize = obs.mod_options.oversize
+        nx_sky = obs.instrument.fov[0]
+        ny_sky = obs.instrument.fov[1]
+
+        # --- Numpy pipeline ---
+        if oversample > 1:
+            cube_rebinned_np = np_rebin(cube_model, (ny_sky * oversize,
+                                                      nx_sky * oversize))
+        else:
+            cube_rebinned_np = cube_model
+
+        # Convolve using scipy (via instrument.convolve)
+        convolved_np = obs.instrument.convolve(cube=cube_rebinned_np,
+                                               spec_center=obs.instrument.line_center)
+
+        if oversize > 1:
+            ny_os = convolved_np.shape[1]
+            nx_os = convolved_np.shape[2]
+            y_start = int(ny_os / 2 - ny_sky / 2)
+            y_end = int(ny_os / 2 + ny_sky / 2)
+            x_start = int(nx_os / 2 - nx_sky / 2)
+            x_end = int(nx_os / 2 + nx_sky / 2)
+            final_np = convolved_np[:, y_start:y_end, x_start:x_end]
+        else:
+            final_np = convolved_np
+
+        # --- JAX pipeline ---
+        cube_jax = jnp.array(cube_model)
+        if oversample > 1:
+            cube_jax = _rebin_spatial(cube_jax, ny_sky * oversize,
+                                       nx_sky * oversize)
+
+        beam_np, lsf_np = get_jax_kernels(obs.instrument)
+        cube_jax = convolve_cube_jax(
+            cube_jax,
+            beam_kernel=jnp.array(beam_np) if beam_np is not None else None,
+            lsf_kernel=jnp.array(lsf_np) if lsf_np is not None else None,
+        )
+
+        if oversize > 1:
+            ny_os_j = cube_jax.shape[1]
+            nx_os_j = cube_jax.shape[2]
+            y_s = (ny_os_j - ny_sky) // 2
+            x_s = (nx_os_j - nx_sky) // 2
+            cube_jax = cube_jax[:, y_s:y_s+ny_sky, x_s:x_s+nx_sky]
+
+        final_jax = np.array(cube_jax)
+
+        # Compare — numpy uses scipy fftconvolve, JAX uses our own.
+        # Allow small rtol for floating-point differences.
+        np.testing.assert_allclose(final_jax, final_np, rtol=1e-8, atol=1e-10)
+
+    def test_loss_near_zero_with_rebin(self):
+        """Full pipeline (rebin+convolve) gives near-zero loss at true params."""
+        from dysmalpy.fitting.jax_loss import make_jax_loss_function
+
+        gal, obs = _make_test_galaxy_obs()
+        dscale = gal.dscale
+
+        # Simulate, rebin, convolve to create fake obs at native resolution
+        cube_model, _ = gal.model.simulate_cube(obs, dscale)
+        cube_model = np.asarray(cube_model)
+
+        oversample = obs.mod_options.oversample
+        oversize = obs.mod_options.oversize
+        nx_sky = obs.instrument.fov[0]
+        ny_sky = obs.instrument.fov[1]
+
+        if oversample > 1:
+            cube_rebinned = np.asarray(_rebin_spatial(
+                jnp.array(cube_model), ny_sky * oversize, nx_sky * oversize))
+        else:
+            cube_rebinned = cube_model
+
+        beam_np, lsf_np = get_jax_kernels(obs.instrument)
+        cube_obs = np.asarray(convolve_cube_jax(
+            jnp.array(cube_rebinned),
+            beam_kernel=jnp.array(beam_np) if beam_np is not None else None,
+            lsf_kernel=jnp.array(lsf_np) if lsf_np is not None else None,
+        ))
+
+        if oversize > 1:
+            y_s = (cube_obs.shape[1] - ny_sky) // 2
+            x_s = (cube_obs.shape[2] - nx_sky) // 2
+            cube_obs = cube_obs[:, y_s:y_s+ny_sky, x_s:x_s+nx_sky]
+
+        noise = np.ones_like(cube_obs)
+        msk = np.ones(cube_obs.shape, dtype=bool)
+
+        jax_loss, get_traceable, set_all = make_jax_loss_function(
+            gal.model, obs, dscale, cube_obs, noise, mask=msk, convolve=True
+        )
+
+        theta = jnp.array(get_traceable())
+        loss_val = float(jax_loss(theta))
+        assert abs(loss_val) < 1e-3, \
+            "Full pipeline loss should be ~0 at true params, got {}".format(
+                loss_val)
+
+    def test_full_pipeline_gradient_finite(self):
+        """jax.grad through simulate+rebin+convolve+chi2 produces finite values."""
+        from dysmalpy.fitting.jax_loss import make_jax_loss_function
+
+        gal, obs = _make_test_galaxy_obs()
+        dscale = gal.dscale
+
+        cube_model, _ = gal.model.simulate_cube(obs, dscale)
+        cube_model = np.asarray(cube_model)
+
+        oversample = obs.mod_options.oversample
+        oversize = obs.mod_options.oversize
+        nx_sky = obs.instrument.fov[0]
+        ny_sky = obs.instrument.fov[1]
+
+        if oversample > 1:
+            cube_native = np.asarray(_rebin_spatial(
+                jnp.array(cube_model), ny_sky * oversize, nx_sky * oversize))
+        else:
+            cube_native = cube_model
+
+        noise = np.ones_like(cube_native)
+        msk = np.ones(cube_native.shape, dtype=bool)
+
+        jax_loss, get_traceable, set_all = make_jax_loss_function(
+            gal.model, obs, dscale, cube_native, noise, mask=msk, convolve=True
+        )
+
+        theta = jnp.array(get_traceable()) + 0.05
+        grads = jax.grad(lambda th: jax_loss(th))(theta)
+        assert jnp.all(jnp.isfinite(grads)), \
+            "Full pipeline gradients should be finite, got: {}".format(grads)

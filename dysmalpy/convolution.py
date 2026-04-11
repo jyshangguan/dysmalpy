@@ -15,7 +15,34 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-__all__ = ['_fft_convolve_3d', 'convolve_cube_jax', 'get_jax_kernels']
+__all__ = ['_rebin_spatial', '_fft_convolve_3d', 'convolve_cube_jax', 'get_jax_kernels']
+
+
+def _rebin_spatial(cube, new_ny, new_nx):
+    """Rebin 3D cube along spatial axes via reshape+sum.
+
+    Matches ``dysmalpy.utils.rebin``.  The spectral axis (axis 0) is
+    preserved; only the y (axis 1) and x (axis 2) axes are rebinned.
+
+    Parameters
+    ----------
+    cube : jnp.ndarray
+        3D input array (nz, ny_in, nx_in).
+    new_ny : int
+        Target size along the y axis.
+    new_nx : int
+        Target size along the x axis.
+
+    Returns
+    -------
+    jnp.ndarray
+        Rebinned array with shape ``(nz, new_ny, new_nx)``.
+    """
+    ny_in = cube.shape[1]
+    nx_in = cube.shape[2]
+    reshape_shape = (cube.shape[0], new_ny, ny_in // new_ny,
+                     new_nx, nx_in // new_nx)
+    return cube.reshape(reshape_shape).sum(-1).sum(-2)
 
 
 def _fft_convolve_3d(cube, kernel):

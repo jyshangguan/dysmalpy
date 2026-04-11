@@ -133,6 +133,25 @@ Steps completed:
    - `TestJAXLossWithConvolution` (4 tests): Convolved loss near zero at true params, convolved vs unconvolved differ, gradient finite with convolution, Adam reduces convolved loss.
    - `TestGetJAXKernels` (3 tests): Beam kernel shape and normalization, LSF kernel shape and normalization, no-kernels returns (None, None).
 
+### Phase 7: JAX Rebin Step + Pipeline Correction
+
+The Phase 6 loss function compared oversampled model cubes directly against native-resolution observed data, which was physically incorrect. This phase adds the missing rebin and crop steps so the JAX pipeline matches the numpy pipeline in `observation.py`.
+
+Steps completed:
+1. Added `_rebin_spatial(cube, new_ny, new_nx)` to `dysmalpy/convolution.py` — JAX-traceable spatial rebin via reshape+sum, matching `dysmalpy.utils.rebin`.
+2. Modified `dysmalpy/fitting/jax_loss.py`:
+   - Both `make_jax_loss_function()` and `make_jax_log_prob_function()` now extract `oversample` and `oversize` from `obs.mod_options`.
+   - Pre-compute concrete rebin/crop dimensions at closure creation time.
+   - Inside the JIT closures, apply the full pipeline: simulate → rebin (if oversample>1) → convolve (if convolve=True) → crop (if oversize>1).
+   - Fast path: when `oversample=1` and `oversize=1`, rebin and crop are skipped entirely.
+3. Fixed existing tests in `tests/test_jax.py`:
+   - Added `_make_test_galaxy_obs_native()` helper with `oversample=1` for backward-compatible Phase 5 tests.
+   - Updated Phase 5 tests (`TestJAXLossFunction`, `TestJAXLogProbFunction`, `TestJAXAdamSmoke`) to use native helper.
+   - Updated Phase 6 tests (`TestJAXLossWithConvolution`) to properly rebin+convolve simulated cubes before using them as fake observed data.
+4. Added 9 Phase 7 tests:
+   - `TestRebinSpatial` (6 tests): Matches numpy rebin, non-square targets, JIT compilation, identity (oversample=1), gradient through rebin, output shape.
+   - `TestFullPipelineRebinConvolveCrop` (3 tests): Full pipeline matches numpy pipeline, loss near zero with rebin, full pipeline gradient finite.
+
 Numerical accuracy: JAX FFT convolution matches `scipy.signal.fftconvolve` to `rtol=1e-10` (float64).
 Gradient check: `jax.grad` through full pipeline (simulate + convolve + chi^2) produces finite values.
 
@@ -153,8 +172,8 @@ Files NOT changed:
 | `dysmalpy/special/bessel.py` | **New** | Modified Bessel K0/K1 (JAX-traceable) |
 | `dysmalpy/special/hyp2f1.py` | **New** | Gauss hypergeometric 2F1 (JAX-traceable) |
 | `dysmalpy/models/cube_processing.py` | **New** | JAX cube population functions |
-| `dysmalpy/convolution.py` | **New** | JAX FFT convolution: `_fft_convolve_3d`, `convolve_cube_jax`, `get_jax_kernels` |
-| `dysmalpy/fitting/jax_loss.py` | **New** | `make_jax_loss_function`, `make_jax_log_prob_function`, `_precompute_cube_ai` |
+| `dysmalpy/convolution.py` | **New** | JAX FFT convolution: `_fft_convolve_3d`, `convolve_cube_jax`, `get_jax_kernels`; JAX rebin: `_rebin_spatial` |
+| `dysmalpy/fitting/jax_loss.py` | **New** | `make_jax_loss_function`, `make_jax_log_prob_function`, `_precompute_cube_ai`; rebin+crop pipeline in loss/log-prob closures |
 | `dysmalpy/fitting/jax_optimize.py` | **New** | `JAXAdamFitter`, `JAXAdamResults` |
 | `dysmalpy/parameters.py` | Modified | Standalone DysmalParameter descriptor |
 | `dysmalpy/models/base.py` | Modified (major) | Metaclass, DysmalModel, constants, jnp, `v_circular` safe division |
@@ -176,7 +195,7 @@ Files NOT changed:
 | `dysmalpy/utils_io.py` | Modified | np.NaN → np.nan |
 | `dysmalpy/fitting_wrappers/data_io.py` | Modified | np.NaN → np.nan |
 | `tests/conftest.py` | **New** | JAX float64 configuration |
-| `tests/test_jax.py` | **New** | 60 JAX-specific unit tests (incl. Phase 5 loss/log-prob/Adam, Phase 6 convolution) |
+| `tests/test_jax.py` | **New** | 69 JAX-specific unit tests (incl. Phase 5 loss/log-prob/Adam, Phase 6 convolution, Phase 7 rebin) |
 | `tests/test_models.py` | Modified | np.NaN → np.nan |
 
 ---
@@ -185,7 +204,7 @@ Files NOT changed:
 
 ### High Priority
 
-- [ ] **JAX rebin step**: `simulate_cube()` returns a cube at oversampled resolution. The observed data is at native resolution. A JAX-compatible rebin step is needed to make convolution work end-to-end at native resolution (currently convolution operates at oversampled resolution).
+(none — all high-priority items completed)
 
 ### Medium Priority
 
@@ -198,10 +217,10 @@ Files NOT changed:
 - [ ] **Remove unused imports**: Clean up any remaining `import numpy as np` in files that only use `jnp`
 - [ ] **Verify pickle compatibility** of new DysmalParameter-based models for MCMC chain serialization
 - [ ] **Fix `np.inf` in parameter defaults**: `light_distributions.py` uses `np.inf` — should work but may cause JAX tracing issues
-- [ ] **Oversampling-aware convolution**: Convolve at native resolution after rebinning, rather than at oversampled resolution
 
 ### Completed (was TODO, now done)
 
+- [x] **Phase 7: JAX rebin step + pipeline correction** — Added `_rebin_spatial` to `convolution.py`. Modified loss/log-prob closures to apply simulate → rebin → convolve → crop pipeline, matching the numpy observation pipeline. Fixed existing tests to use proper native-resolution fake obs. 9 new tests. All existing + new tests pass.
 - [x] **Phase 6: JAX FFT convolution** — Created `dysmalpy/convolution.py` with `_fft_convolve_3d`, `convolve_cube_jax`, `get_jax_kernels`. Added `convolve` parameter to loss/log-prob functions. `JAXAdamFitter` now passes `convolve=True`. 14 new tests, all pass. Numerical accuracy matches scipy to `rtol=1e-10` (float64).
 - [x] **Fix `_make_cube_ai` for JIT**: The sparse index array `ai` used by `populate_cube_jax_ais` depends on coordinate arrays that become JAX tracers under `jax.jit`. Fix: pre-compute `ai` with concrete values before JIT compilation in `jax_loss.py:_precompute_cube_ai()`, then pass it to `simulate_cube(ai_precomputed=...)`. Added `ai_precomputed` and `ai_sky_precomputed` optional parameters to `simulate_cube()`.
 - [x] **Complete kinematic_options.py conversion** (Phase 4 final piece): Replaced all remaining scipy dependencies with JAX-compatible implementations:
@@ -248,7 +267,7 @@ All 27 existing tests pass:
 - All `test_fitting_wrapper_model_*` — end-to-end fitting wrapper (10 tests)
 
 ### New JAX-specific tests (`tests/test_jax.py`)
-60 tests covering:
+69 tests covering:
 - Special functions against scipy reference values (4+4+3 tests)
 - DysmalParameter descriptor behavior (5 tests)
 - Cube population correctness (4 tests)
@@ -258,6 +277,7 @@ All 27 existing tests pass:
 - Cube helpers (2 tests)
 - Phase 5: Loss function correctness, gradient computation, log-prob function, Adam optimizer smoke test (5+2+1 tests)
 - Phase 6: FFT convolution against scipy, JIT compilation, gradients; loss with convolution integration; kernel extraction (7+4+3 tests)
+- Phase 7: Spatial rebin against numpy, JIT compilation, gradients, identity; full pipeline rebin+convolve+crop; loss near zero with rebin (6+3 tests)
 
 See `tests/test_jax.py` for details.
 
@@ -276,7 +296,9 @@ Phase 1 (DysmalParameter) ──┐    │
                              │                    └─> Phase 5 (JAX fitting)  [DONE]
                              │                             │
                              │                             └─> Phase 6 (convolution)  [DONE]
+                             │                                       │
+                             │                                       └─> Phase 7 (rebin + pipeline)  [DONE]
 ```
 
-*Phase 0-6 complete — full JAX pipeline from theta -> simulate_cube -> convolve -> chi^2 is JIT-compilable.*
-*All 87 tests pass (27 existing + 60 JAX-specific) with zero xfails.*
+*Phase 0-7 complete — full JAX pipeline from theta -> simulate_cube -> rebin -> convolve -> crop -> chi^2 is JIT-compilable.*
+*All 96 tests pass (27 existing + 69 JAX-specific) with zero xfails.*

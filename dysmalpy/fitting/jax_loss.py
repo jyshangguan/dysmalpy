@@ -247,6 +247,25 @@ def make_jax_loss_function(model_set, obs, dscale, cube_obs, noise,
 
     _do_convolve = (_beam_kernel_jax is not None or _lsf_kernel_jax is not None)
 
+    # Pre-compute rebin/crop dimensions (concrete Python ints, known at
+    # closure creation time from oversample and oversize).
+    oversample = obs.mod_options.oversample
+    oversize = obs.mod_options.oversize
+    _do_rebin = (oversample > 1)
+    _do_crop = (oversize > 1)
+
+    if _do_rebin or _do_crop:
+        from dysmalpy.convolution import _rebin_spatial
+        nx_sky = obs.instrument.fov[0]
+        ny_sky = obs.instrument.fov[1]
+        rebin_ny = ny_sky * oversize
+        rebin_nx = nx_sky * oversize
+        # Crop indices (concrete Python ints)
+        crop_y_start = (rebin_ny - ny_sky) // 2
+        crop_y_end = crop_y_start + ny_sky
+        crop_x_start = (rebin_nx - nx_sky) // 2
+        crop_x_end = crop_x_start + nx_sky
+
     def _inject_tracers(theta_traceable):
         """Inject JAX tracer values into model parameter storage."""
         for (cmp_name, param_name), theta_idx in reindexed:
@@ -261,10 +280,20 @@ def make_jax_loss_function(model_set, obs, dscale, cube_obs, noise,
                                                  ai_precomputed=ai_precomputed,
                                                  ai_sky_precomputed=ai_sky_precomputed)
 
+        # Rebin from oversampled to native pixel scale
+        if _do_rebin:
+            cube_model = _rebin_spatial(cube_model, rebin_ny, rebin_nx)
+
+        # Convolve (beam then LSF)
         if _do_convolve:
             cube_model = convolve_cube_jax(cube_model,
                                            beam_kernel=_beam_kernel_jax,
                                            lsf_kernel=_lsf_kernel_jax)
+
+        # Crop to native FOV if oversize > 1
+        if _do_crop:
+            cube_model = cube_model[:, crop_y_start:crop_y_end,
+                                     crop_x_start:crop_x_end]
 
         if mask_jax is not None:
             chi_sq = jnp.sum(
@@ -387,6 +416,23 @@ def make_jax_log_prob_function(model_set, obs, dscale, cube_obs, noise,
 
     _do_convolve = (_beam_kernel_jax is not None or _lsf_kernel_jax is not None)
 
+    # Pre-compute rebin/crop dimensions (concrete Python ints)
+    oversample = obs.mod_options.oversample
+    oversize = obs.mod_options.oversize
+    _do_rebin = (oversample > 1)
+    _do_crop = (oversize > 1)
+
+    if _do_rebin or _do_crop:
+        from dysmalpy.convolution import _rebin_spatial
+        nx_sky = obs.instrument.fov[0]
+        ny_sky = obs.instrument.fov[1]
+        rebin_ny = ny_sky * oversize
+        rebin_nx = nx_sky * oversize
+        crop_y_start = (rebin_ny - ny_sky) // 2
+        crop_y_end = crop_y_start + ny_sky
+        crop_x_start = (rebin_nx - nx_sky) // 2
+        crop_x_end = crop_x_start + nx_sky
+
     def _inject_tracers(theta_traceable):
         for (cmp_name, param_name), theta_idx in reindexed:
             comp = model_set.components[cmp_name]
@@ -402,10 +448,20 @@ def make_jax_log_prob_function(model_set, obs, dscale, cube_obs, noise,
         _inject_tracers(theta_traceable)
         cube_model, _ = model_set.simulate_cube(obs, dscale)
 
+        # Rebin from oversampled to native pixel scale
+        if _do_rebin:
+            cube_model = _rebin_spatial(cube_model, rebin_ny, rebin_nx)
+
+        # Convolve (beam then LSF)
         if _do_convolve:
             cube_model = convolve_cube_jax(cube_model,
                                            beam_kernel=_beam_kernel_jax,
                                            lsf_kernel=_lsf_kernel_jax)
+
+        # Crop to native FOV if oversize > 1
+        if _do_crop:
+            cube_model = cube_model[:, crop_y_start:crop_y_end,
+                                     crop_x_start:crop_x_end]
 
         if mask_jax is not None:
             chi_sq = jnp.sum(
