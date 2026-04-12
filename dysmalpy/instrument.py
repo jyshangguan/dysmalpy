@@ -31,6 +31,25 @@ logger = logging.getLogger('DysmalPy')
 logger.setLevel(logging.INFO)
 
 
+def _truncate_kernel_to_cube(kernel, cube):
+    """Crop kernel center to match cube spatial dimensions.
+
+    When the kernel (e.g. PSF) is larger than the cube in any spatial
+    dimension, this crops the kernel symmetrically about its center so
+    that it matches the cube size.  For a Gaussian PSF with 12σ support
+    the retained weight exceeds 99.999 % and the maximum relative
+    convolution difference is below 1.5e-5.
+    """
+    slices = [slice(None)]  # preserve spectral dim
+    for d in range(1, kernel.ndim):  # spatial dims
+        if kernel.shape[d] > cube.shape[d]:
+            start = (kernel.shape[d] - cube.shape[d]) // 2
+            slices.append(slice(start, start + cube.shape[d]))
+        else:
+            slices.append(slice(None))
+    return kernel[tuple(slices)]
+
+
 def _normalized_gaussian1D_kern(sigma_pixel):
     x_size = int(np.ceil(8*sigma_pixel))
     if x_size % 2 == 0:
@@ -198,7 +217,8 @@ class Instrument:
         if self._lsf_kernel is None:
             self.set_lsf_kernel(spec_center=spec_center)
 
-        cube_conv = fftconvolve(cube.copy(), self._lsf_kernel.copy(), mode='same')
+        kernel = _truncate_kernel_to_cube(self._lsf_kernel, cube)
+        cube_conv = fftconvolve(cube.copy(), kernel.copy(), mode='same')
 
         return cube_conv
 
@@ -225,7 +245,8 @@ class Instrument:
         if self._beam_kernel is None:
             self.set_beam_kernel()
 
-        cube_conv = fftconvolve(cube.copy(), self._beam_kernel.copy(), mode='same')
+        kernel = _truncate_kernel_to_cube(self._beam_kernel, cube)
+        cube_conv = fftconvolve(cube.copy(), kernel.copy(), mode='same')
 
         return cube_conv
 

@@ -96,6 +96,24 @@ def _fft_convolve_3d(cube, kernel):
     return result
 
 
+def _crop_kernel(kernel, cube):
+    """Crop kernel center to match cube spatial dimensions.
+
+    When the kernel (e.g. PSF) is larger than the cube in any spatial
+    dimension, this crops the kernel symmetrically about its center so
+    that it matches the cube size.  Applied before the JAX-traced
+    convolution so that padding shapes stay small.
+    """
+    slices = [slice(None)]  # preserve spectral dim
+    for d in range(1, kernel.ndim):  # spatial dims
+        if kernel.shape[d] > cube.shape[d]:
+            start = (kernel.shape[d] - cube.shape[d]) // 2
+            slices.append(slice(start, start + cube.shape[d]))
+        else:
+            slices.append(slice(None))
+    return kernel[tuple(slices)]
+
+
 def convolve_cube_jax(cube, beam_kernel=None, lsf_kernel=None):
     """Apply PSF (beam) and/or LSF convolution to a 3D model cube.
 
@@ -118,9 +136,11 @@ def convolve_cube_jax(cube, beam_kernel=None, lsf_kernel=None):
     cube = jnp.asarray(cube)
 
     if beam_kernel is not None:
+        beam_kernel = _crop_kernel(np.asarray(beam_kernel), np.asarray(cube))
         cube = _fft_convolve_3d(cube, jnp.asarray(beam_kernel))
 
     if lsf_kernel is not None:
+        lsf_kernel = _crop_kernel(np.asarray(lsf_kernel), np.asarray(cube))
         cube = _fft_convolve_3d(cube, jnp.asarray(lsf_kernel))
 
     return cube
