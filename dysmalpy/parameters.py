@@ -1102,6 +1102,41 @@ class DysmalParameter:
             self._default = val
 
     # ------------------------------------------------------------------
+    # Constraint syncing
+    # ------------------------------------------------------------------
+
+    def __setattr__(self, name, value):
+        # Set the attribute normally
+        super().__setattr__(name, value)
+
+        # If 'bounds' is set and we are bound to a model, also update the
+        # _param_instances copy so that model.bounds stays in sync.
+        # NOTE: We do NOT sync 'fixed' or 'tied' through this mechanism.
+        # - 'fixed': setup_gal_models sets halomvirial.fixed = False on the
+        #   class-level descriptor AFTER add_component. The model_set.fixed
+        #   dict (shared ref with comp.fixed) should NOT be updated, because
+        #   _get_free_parameters() uses it. The original astropy-based code
+        #   had separate storage for the Parameter.fixed flag vs the
+        #   model.fixed dict.
+        # - 'tied': tied functions set after add_component are intentionally
+        #   left out of model_set.tied. _update_tied_parameters() scans
+        #   class-level descriptors directly.
+        if name == 'bounds' and not self.__dict__.get('_syncing'):
+            model = self.__dict__.get('_model')
+            pname = self.__dict__.get('_name')
+            if model is not None and pname is not None:
+                instances = model.__dict__.get('_param_instances', {})
+                if pname in instances:
+                    target = instances[pname]
+                    target.__dict__['_syncing'] = True
+                    try:
+                        setattr(target, name, value)
+                    finally:
+                        target.__dict__['_syncing'] = False
+                    if 'bounds' in model.__dict__:
+                        model.bounds[pname] = value
+
+    # ------------------------------------------------------------------
     # Pickle support
     # ------------------------------------------------------------------
 

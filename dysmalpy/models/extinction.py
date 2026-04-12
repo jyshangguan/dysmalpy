@@ -108,7 +108,7 @@ class ThinCentralPlaneDustExtinction(DustExtinction):
 
         zsky_dust = ydust * np.sin(-inc)
         extinction = np.ones(x.shape)
-        extinction[zsky <= zsky_dust] = (1.-amp_extinct)
+        extinction = np.where(zsky <= zsky_dust, (1.-amp_extinct), extinction)
 
         return extinction
 

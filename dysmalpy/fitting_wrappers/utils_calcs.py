@@ -153,7 +153,7 @@ def auto_gen_3D_mask(cube=None, err=None,
             segfluxmax = 0.
             for seg in segm.segments:
                 mseg = seg._segment_data.copy()
-                mseg[mseg>0] = 1
+                mseg = np.where(mseg > 0, 1, mseg)
                 mseg_flux = fmap_cube_sn.copy() * mseg
                 if mseg_flux.sum() > segfluxmax:
                     segfluxmax = mseg_flux.sum()
@@ -176,7 +176,7 @@ def auto_gen_3D_mask(cube=None, err=None,
         sn_map_cube_sn[~np.isfinite(sn_map_cube_sn)] = 0
 
         mask2D = np.ones(sn_map_cube_sn.shape)
-        mask2D[sn_map_cube_sn < snr_int_flux_thresh] = 0
+        mask2D = np.where(sn_map_cube_sn < snr_int_flux_thresh, 0, mask2D)
 
     if mask2D is not None:
         # Apply mask2D to mask:
@@ -207,7 +207,7 @@ def _auto_gen_3D_mask_pixel_SNR(cube=None, err=None, snr_thresh=3.):
     snr_cube[~np.isfinite(snr_cube)] = 0.
 
     mask = np.ones(cube.shape)
-    mask[snr_cube < snr_thresh] = 0
+    mask = np.where(snr_cube < snr_thresh, 0, mask)
 
 
     return mask

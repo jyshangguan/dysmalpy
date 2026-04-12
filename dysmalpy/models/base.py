@@ -292,6 +292,16 @@ class _DysmalModel(metaclass=_DysmalModelMeta):
             if pname in self._param_instances:
                 self._param_instances[pname].value = float(value)
 
+        # Apply user-supplied fixed/bounds/tied dicts (if provided)
+        if 'fixed' in kwargs and isinstance(kwargs['fixed'], dict):
+            for pname, is_fixed in kwargs['fixed'].items():
+                if pname in self._param_instances:
+                    self._param_instances[pname].fixed = is_fixed
+        if 'bounds' in kwargs and isinstance(kwargs['bounds'], dict):
+            for pname, bnds in kwargs['bounds'].items():
+                if pname in self._param_instances:
+                    self._param_instances[pname].bounds = tuple(bnds)
+
         # Build numpy array of current parameter values (host-side, for
         # optimizer / sampler access -- NOT used inside JAX-traced code).
         self.parameters = np.array(

@@ -1475,7 +1475,7 @@ def plot_aperture_compare_3D_cubes(obs, model, datacube=None, errcube=None,
                     cube=modelcube, mask=mask, skip_specmask=True)
             _, maskarr, _ = apertures.apertures[k].extract_aper_spec(spec_arr=specarr,
                     cube=mask, skip_specmask=True)
-            maskarr[maskarr>0] = 1.
+            maskarr = np.where(maskarr > 0, 1., maskarr)
 
             if not skip_fits:
                 gmod_flux2=flux1d_mod_mom[k]
@@ -3430,7 +3430,7 @@ def plot_single_obs_rotcurve_components(obs, model,
         vel_asymm_drift_sq = model.kinematic_options.get_asymm_drift_profile(model_int.rarr,
                                                     model, tracer=obs.tracer)
         vsq = model_int.data['vcirc_tot'] ** 2 - vel_asymm_drift_sq
-        vsq[vsq<0] = 0.
+        vsq = np.where(vsq < 0, 0., vsq)
 
         model_int.data['vrot'] = np.sqrt(vsq)
 
@@ -3791,7 +3791,7 @@ def aper_centers_arcsec_from_cube(datacube, obs, model, mask=None,
     else:
         # Just use unmasked range:
         maskflat = np.sum(mask, axis=0)
-        maskflat[maskflat>0] = 1
+        maskflat = np.where(maskflat > 0, 1, maskflat)
         mask2D = np.array(maskflat, dtype=bool)
         rstep_A = 0.25
 
@@ -3970,7 +3970,7 @@ def extract_1D_from_cube_general(datacube, obs, model, inst1d, errcube=None, mas
         mask2d = np.sum(mask, axis=0)
         whzero = np.where(mask2d == 0)
         maskspec = np.sum(np.sum(mask, axis=2), axis=1)
-        maskspec[maskspec>0] = 1
+        maskspec = np.where(maskspec > 0, 1, maskspec)
         mask_filled = np.tile(maskspec.reshape((maskspec.shape[0],1,1)), (1, data_scaled.shape[1], data_scaled.shape[2]))
         mask[:, whzero[0], whzero[1]] = mask_filled[:, whzero[0], whzero[1]]
 

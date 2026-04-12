@@ -207,9 +207,10 @@ class ModelSet:
 
         # Check param name order, in case it's changed since the object was pickled:
         for key in self.components.keys():
-            if list(self.components[key]._param_metrics.keys()) != list(self.components[key].param_names):
-                # Reset param name order to match slice order:
-                self.components[key].param_names = tuple(self.components[key]._param_metrics.keys())
+            if hasattr(self.components[key], '_param_metrics'):
+                if list(self.components[key]._param_metrics.keys()) != list(self.components[key].param_names):
+                    # Reset param name order to match slice order:
+                    self.components[key].param_names = tuple(self.components[key]._param_metrics.keys())
 
         # quick test if necessary to migrate:
         if 'higher_order_components' not in state.keys():

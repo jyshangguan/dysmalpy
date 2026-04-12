@@ -103,8 +103,8 @@ class MPFITFitter(base.Fitter):
 
                     bounds = gal.model.components[cmp].bounds[param_name]
                     k = pkeys[cmp][param_name]
-                    parinfo[k]['limits'][0] = bounds[0]
-                    parinfo[k]['limits'][1] = bounds[1]
+                    parinfo[k]['limits'][0] = -np.inf if bounds[0] is None else bounds[0]
+                    parinfo[k]['limits'][1] = np.inf if bounds[1] is None else bounds[1]
                     parinfo[k]['value'] = p_initial[k]
                     parinfo[k]['parname'] = '{}:{}'.format(cmp, param_name)
 

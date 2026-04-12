@@ -93,7 +93,7 @@ class Aperture(object):
         if mask is not None:
             mask_cube *= mask
             spec_mask2 = np.sum(np.sum(mask_cube, axis=2), axis=1)
-            spec_mask2[spec_mask2>0] = 1.
+            spec_mask2 = np.where(spec_mask2 > 0, 1., spec_mask2)
             spec_mask2 = np.array(spec_mask2, dtype=bool)
             if spec_mask is None:
                 spec_mask = spec_mask2

@@ -267,8 +267,8 @@ class Instrument:
 
             kern2D = self.beam.copy()
 
-            kern2D[~np.isfinite(kern2D)] = 0.               # Replace NaNs/non-finite with zero
-            kern2D[kern2D<0.] = 0.                          # Replace < 0 with zero:
+            kern2D = np.where(np.isfinite(kern2D), kern2D, 0.)  # Replace NaNs/non-finite with zero
+            kern2D = np.where(kern2D < 0., 0., kern2D)          # Replace < 0 with zero:
 
             kern2D /= np.sum(kern2D[np.isfinite(kern2D)])   # need to normalize
 
