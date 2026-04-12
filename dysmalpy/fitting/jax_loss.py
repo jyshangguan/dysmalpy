@@ -18,7 +18,8 @@ import jax.numpy as jnp
 import numpy as np
 
 
-__all__ = ['make_jax_loss_function', 'make_jax_log_prob_function']
+__all__ = ['make_jax_loss_function', 'make_jax_log_prob_function',
+           'make_jax_loss_function_1d']
 
 
 def _precompute_cube_ai(model_set, obs, dscale):
@@ -483,3 +484,252 @@ def make_jax_log_prob_function(model_set, obs, dscale, cube_obs, noise,
         model_set.update_parameters(theta_full)
 
     return log_prob_fn, get_traceable_theta, set_all_theta
+
+
+def extract_1d_moments_jax(cube, spec_arr, aperture_masks):
+    """Extract 1D kinematic profiles from a cube using moment method.
+
+    This is a JAX-traceable equivalent of
+    ``Aperture.extract_aper_kin()`` with ``moment=True``.
+
+    Parameters
+    ----------
+    cube : jnp.ndarray
+        3D data cube (nspec, ny, nx).
+    spec_arr : jnp.ndarray
+        1D spectral axis array (nspec,).
+    aperture_masks : list of jnp.ndarray
+        List of 2D aperture masks (ny, nx).
+
+    Returns
+    -------
+    flux1d : jnp.ndarray
+        Integrated flux per aperture (n_apertures,).
+    vel1d : jnp.ndarray
+        Velocity (first moment) per aperture (n_apertures,).
+    disp1d : jnp.ndarray
+        Dispersion (second moment) per aperture (n_apertures,).
+    """
+    delspec = jnp.mean(spec_arr[1:] - spec_arr[:-1])
+
+    flux1d = []
+    vel1d = []
+    disp1d = []
+
+    for mask_2d in aperture_masks:
+        # Broadcast mask to 3D and extract spectrum
+        mask_3d = mask_2d[jnp.newaxis, :, :]  # (1, ny, nx)
+        spec = jnp.nansum(cube * mask_3d, axis=(1, 2))  # (nspec,)
+
+        mom0 = jnp.sum(spec) * delspec
+        mom1 = jnp.sum(spec * spec_arr) * delspec / jnp.where(mom0 != 0, mom0, 1.)
+        mom2 = jnp.sum(spec * (spec_arr - mom1) ** 2) * delspec / jnp.where(mom0 != 0, mom0, 1.)
+
+        flux1d.append(mom0)
+        vel1d.append(mom1)
+        disp1d.append(jnp.sqrt(jnp.abs(mom2)))
+
+    return jnp.stack(flux1d), jnp.stack(vel1d), jnp.stack(disp1d)
+
+
+def make_jax_loss_function_1d(model_set, obs, dscale, vel_obs, vel_err, disp_obs,
+                              disp_err, mask_vel=None, mask_disp=None,
+                              inst_corr=False, lsf_dispersion=0.0,
+                              fit_velocity=True, fit_dispersion=True,
+                              weight=1.0, convolve=True):
+    """Return a JAX-traceable chi-squared loss function for 1D fitting.
+
+    The loss function:
+    1. Injects tracers into model parameter storage
+    2. Calls ``simulate_cube()`` (rebin + convolve + crop)
+    3. Calls ``extract_1d_moments_jax()`` on the model cube
+    4. Computes chi-squared on velocity/dispersion profiles
+    5. Applies inst dispersion correction if data is inst-corrected
+
+    Parameters
+    ----------
+    model_set : ModelSet
+        The model set whose free parameters define the loss landscape.
+    obs : Observation
+        Observation descriptor (used by ``simulate_cube``).
+    dscale : float
+        Arcsec-to-kpc conversion factor.
+    vel_obs : array-like
+        Observed velocity profile.
+    vel_err : array-like
+        Velocity errors.
+    disp_obs : array-like
+        Observed dispersion profile.
+    disp_err : array-like
+        Dispersion errors.
+    mask_vel : array-like or None
+        Boolean mask for velocity data.
+    mask_disp : array-like or None
+        Boolean mask for dispersion data.
+    inst_corr : bool
+        If True, data dispersion is instrument-corrected; model dispersion
+        must be corrected accordingly.
+    lsf_dispersion : float
+        LSF dispersion in km/s (used for inst correction).
+    fit_velocity : bool
+        Whether to include velocity in chi-squared.
+    fit_dispersion : bool
+        Whether to include dispersion in chi-squared.
+    weight : float
+        Observation weight.
+    convolve : bool
+        If True, apply PSF/LSF convolution to the model cube.
+
+    Returns
+    -------
+    callable
+        ``jax_chi2(theta_traceable) -> float`` (half chi-squared, scalar).
+    get_traceable_theta : callable
+        ``get_traceable_theta() -> ndarray``
+    set_all_theta : callable
+        ``set_all_theta(theta_full) -> None``
+    """
+    # Convert observed data to numpy constants
+    vel_obs_np = np.asarray(vel_obs, dtype=np.float64)
+    vel_err_np = np.asarray(vel_err, dtype=np.float64)
+    disp_obs_np = np.asarray(disp_obs, dtype=np.float64)
+    disp_err_np = np.asarray(disp_err, dtype=np.float64)
+
+    if mask_vel is not None:
+        mask_vel_np = np.asarray(mask_vel)
+    else:
+        mask_vel_np = None
+
+    if mask_disp is not None:
+        mask_disp_np = np.asarray(mask_disp)
+    else:
+        mask_disp_np = None
+
+    _inst_corr = inst_corr
+    _lsf_disp2 = float(lsf_dispersion) ** 2
+
+    # Identify traceable parameters
+    reindexed, n_traceable, orig_theta_indices = _identify_traceable_params(model_set)
+
+    # Pre-compute aperture masks from obs.instrument.apertures
+    aperture_masks = []
+    for aper in obs.instrument.apertures.apertures:
+        mask_np = np.asarray(aper._mask_ap, dtype=np.float64)
+        # Replace negative values (from partial weight calc) with 0
+        mask_np = np.where(mask_np < 0, 0., mask_np)
+        aperture_masks.append(mask_np)
+
+    # Construct spectral axis
+    nspec = obs.instrument.nspec
+    spec_start = float(obs.instrument.spec_start.value)
+    spec_step = float(obs.instrument.spec_step.value)
+    spec_arr = np.asarray(spec_start + np.arange(nspec) * spec_step, dtype=np.float64)
+
+    # Pre-compute AI arrays for z-truncation
+    ai_precomputed = None
+    ai_sky_precomputed = None
+    if obs.mod_options.zcalc_truncate:
+        _ai_precomputed = _precompute_cube_ai(model_set, obs, dscale)
+        ai_precomputed = _ai_precomputed.get('ai')
+        ai_sky_precomputed = _ai_precomputed.get('ai_sky')
+
+    # Extract convolution kernels
+    _beam_kernel_jax = None
+    _lsf_kernel_jax = None
+    if convolve and obs.instrument is not None:
+        from dysmalpy.convolution import get_jax_kernels, convolve_cube_jax
+        beam_np, lsf_np = get_jax_kernels(obs.instrument)
+        if beam_np is not None:
+            _beam_kernel_jax = jnp.asarray(beam_np)
+        if lsf_np is not None:
+            _lsf_kernel_jax = jnp.asarray(lsf_np)
+
+    _do_convolve = (_beam_kernel_jax is not None or _lsf_kernel_jax is not None)
+
+    # Pre-compute rebin/crop dimensions
+    oversample = obs.mod_options.oversample
+    oversize = obs.mod_options.oversize
+    _do_rebin = (oversample > 1)
+    _do_crop = (oversize > 1)
+
+    if _do_rebin or _do_crop:
+        from dysmalpy.convolution import _rebin_spatial
+        nx_sky = obs.instrument.fov[0]
+        ny_sky = obs.instrument.fov[1]
+        rebin_ny = ny_sky * oversize
+        rebin_nx = nx_sky * oversize
+        crop_y_start = (rebin_ny - ny_sky) // 2
+        crop_y_end = crop_y_start + ny_sky
+        crop_x_start = (rebin_nx - nx_sky) // 2
+        crop_x_end = crop_x_start + nx_sky
+
+    def _inject_tracers(theta_traceable):
+        for (cmp_name, param_name), theta_idx in reindexed:
+            comp = model_set.components[cmp_name]
+            sname = _storage_name(param_name)
+            # Use plain float (not JAX tracer) since simulate_cube is not
+            # JAX-traceable
+            val = float(theta_traceable[theta_idx]) if hasattr(theta_traceable[theta_idx], '__float__') else float(theta_traceable[theta_idx])
+            object.__setattr__(comp, sname, val)
+            # Also update the DysmalParameter descriptor's default
+            if param_name in comp._param_instances:
+                comp._param_instances[param_name]._default = val
+
+    def jax_chi2(theta_traceable):
+        _inject_tracers(theta_traceable)
+
+        cube_model, _ = model_set.simulate_cube(obs, dscale,
+                                                 ai_precomputed=ai_precomputed,
+                                                 ai_sky_precomputed=ai_sky_precomputed)
+        cube_model = np.asarray(cube_model, dtype=np.float64)
+
+        # Rebin
+        if _do_rebin:
+            from dysmalpy.utils import rebin
+            cube_model = np.asarray(rebin(cube_model, (rebin_ny, rebin_nx)))
+
+        # Convolve
+        if _do_convolve:
+            cube_model = np.asarray(
+                obs.instrument.convolve(cube_model, spec_center=obs.instrument.line_center))
+
+        # Crop
+        if _do_crop:
+            cube_model = cube_model[:, crop_y_start:crop_y_end,
+                                     crop_x_start:crop_x_end]
+
+        # Extract 1D profiles via moment method (numpy version)
+        flux1d, vel_mod, disp_mod = extract_1d_moments_jax(
+            cube_model, spec_arr, aperture_masks)
+
+        # Inst dispersion correction
+        if _inst_corr:
+            disp_mod = np.sqrt(np.maximum(disp_mod ** 2 - _lsf_disp2, 0.))
+
+        # Chi-squared
+        chi_sq = 0.0
+
+        if fit_velocity:
+            if mask_vel_np is not None:
+                chi_sq += np.sum(
+                    ((vel_obs_np - vel_mod) / vel_err_np) ** 2 * mask_vel_np)
+            else:
+                chi_sq += np.sum(((vel_obs_np - vel_mod) / vel_err_np) ** 2)
+
+        if fit_dispersion:
+            if mask_disp_np is not None:
+                chi_sq += np.sum(
+                    ((disp_obs_np - disp_mod) / disp_err_np) ** 2 * mask_disp_np)
+            else:
+                chi_sq += np.sum(((disp_obs_np - disp_mod) / disp_err_np) ** 2)
+
+        return 0.5 * chi_sq * weight
+
+    def get_traceable_theta():
+        pfree = model_set.get_free_parameters_values()
+        return np.array([pfree[i] for i in orig_theta_indices])
+
+    def set_all_theta(theta_full):
+        model_set.update_parameters(theta_full)
+
+    return jax_chi2, get_traceable_theta, set_all_theta

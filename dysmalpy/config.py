@@ -14,6 +14,11 @@ from collections import OrderedDict
 from dysmalpy.data_io import ensure_dir
 from dysmalpy.fitting import MCMCFitter, MPFITFitter, NestedFitter
 
+try:
+    from dysmalpy.fitting import JAXAdamFitter
+except ImportError:
+    JAXAdamFitter = None
+
 # Third party import
 
 __all__ = [ "OutputOptions" ]
@@ -132,6 +137,8 @@ class OutputOptions:
             fit_type = 'mpfit'
         elif isinstance(fitter, NestedFitter):
             fit_type = 'nested'
+        elif JAXAdamFitter is not None and isinstance(fitter, JAXAdamFitter):
+            fit_type = 'jax_adam'
         else:
             raise ValueError("Unrecognized Fitter: {}!".format(type(fitter)))
 

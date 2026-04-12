@@ -17,7 +17,7 @@ from dysmalpy import galaxy
 from dysmalpy import utils as dpy_utils
 from dysmalpy.fitting import base
 from dysmalpy.fitting import utils as fit_utils
-from dysmalpy.fitting.jax_loss import make_jax_loss_function
+from dysmalpy.fitting.jax_loss import make_jax_loss_function, make_jax_loss_function_1d
 
 # Third party imports
 import numpy as np
@@ -81,6 +81,10 @@ class JAXAdamFitter(base.Fitter):
     grid shapes and cannot be JAX-traced.
     """
 
+    def __init__(self, **kwargs):
+        self._set_defaults()
+        super(JAXAdamFitter, self).__init__(fit_method='JAXAdam', **kwargs)
+
     def _set_defaults(self):
         self.n_steps = 1000
         self.learning_rate = 1e-3
@@ -134,26 +138,93 @@ class JAXAdamFitter(base.Fitter):
             noise = np.where((noise == 0) & (msk == 0), 99., noise)
 
             weight = float(obs.weight)
+
+        elif obs.data.ndim == 1:
+            # 1D profile fitting: extract observed profiles and build
+            # loss function with aperture-based moment extraction
+            if not obs.instrument.moment:
+                raise ValueError(
+                    "JAXAdamFitter requires obs.instrument.moment=True "
+                    "for 1D fitting (JAX-traceable moment extraction)."
+                )
+
+            vel_obs = obs.data.data['velocity']
+            vel_err = obs.data.error['velocity']
+            disp_obs = obs.data.data['dispersion']
+            disp_err = obs.data.error['dispersion']
+            weight = float(obs.weight) if obs.weight is not None else 1.0
+
+            mask_vel = obs.data.mask_velocity if obs.data.mask_velocity is not None else obs.data.mask
+            mask_disp = obs.data.mask_vel_disp if obs.data.mask_vel_disp is not None else obs.data.mask
+
+            inst_corr = obs.data.data.get('inst_corr', False)
+            lsf_dispersion = 0.0
+            if inst_corr and obs.instrument.lsf is not None:
+                # Extract LSF dispersion value (always in km/s)
+                lsf_disp = obs.instrument.lsf.dispersion
+                if hasattr(lsf_disp, 'unit'):
+                    import astropy.units as astropy_u
+                    lsf_dispersion = lsf_disp.to(astropy_u.km / astropy_u.s).value
+                else:
+                    lsf_dispersion = float(lsf_disp)
+
+            fit_velocity = obs.fit_options.fit_velocity
+            fit_dispersion = obs.fit_options.fit_dispersion
+
         else:
             raise NotImplementedError(
-                "JAXAdamFitter currently only supports 3D (cube) observations."
+                "JAXAdamFitter currently only supports 1D and 3D observations."
             )
 
         # Get dscale (arcsec per kpc proper)
         dscale = gal.dscale
 
         # Build loss function
-        jax_loss, get_traceable_theta, set_all_theta = make_jax_loss_function(
-            gal.model, obs, dscale, cube_obs, noise,
-            mask=msk, weight=weight, convolve=True,
-        )
+        if obs.data.ndim == 3:
+            jax_loss, get_traceable_theta, set_all_theta = make_jax_loss_function(
+                gal.model, obs, dscale, cube_obs, noise,
+                mask=msk, weight=weight, convolve=True,
+            )
+        elif obs.data.ndim == 1:
+            # Ensure model_set constraint dicts are up-to-date
+            # (component-level fixed/tied may have been modified after
+            # add_component was called)
+            for cmp_name in gal.model.components:
+                comp = gal.model.components[cmp_name]
+                gal.model.fixed[cmp_name] = dict(comp.fixed)
+                gal.model.tied[cmp_name] = dict(comp.tied)
+            gal.model.nparams_free = sum(
+                1 for c in gal.model.components
+                for p in gal.model.fixed[c]
+                if not gal.model.fixed[c][p] and not gal.model.tied[c][p]
+            )
+
+            jax_loss, get_traceable_theta, set_all_theta = make_jax_loss_function_1d(
+                gal.model, obs, dscale,
+                vel_obs=vel_obs, vel_err=vel_err,
+                disp_obs=disp_obs, disp_err=disp_err,
+                mask_vel=mask_vel, mask_disp=mask_disp,
+                inst_corr=inst_corr, lsf_dispersion=lsf_dispersion,
+                fit_velocity=fit_velocity, fit_dispersion=fit_dispersion,
+                weight=weight, convolve=True,
+            )
 
         # JIT-compile loss + gradient
-        loss_grad_fn = jax.jit(jax.value_and_grad(jax_loss))
+        if obs.data.ndim == 3:
+            loss_grad_fn = jax.jit(jax.value_and_grad(jax_loss))
+        else:
+            # 1D/2D: simulate_cube uses scipy.interpolate which is not
+            # JAX-traceable, so we cannot JIT or autodiff the full pipeline.
+            # Use numerical (finite-difference) gradients instead.
+            # Disable JAX JIT to avoid repeated LLVM compilation of
+            # gammaincinv inside simulate_cube's sersic profile.
+            loss_grad_fn = None
+            jax.config.update("jax_disable_jit", True)
 
         # Get initial traceable theta
         theta = jnp.array(get_traceable_theta(), dtype=jnp.float64)
         n_traceable = int(theta.shape[0])
+        logger.info("    nFreeParams: {}".format(gal.model.nparams_free))
 
         logger.info("    nTraceableParams: {}".format(n_traceable))
         logger.info("    nSteps: {}".format(self.n_steps))
@@ -177,7 +248,21 @@ class JAXAdamFitter(base.Fitter):
         pfree_full = gal.model.get_free_parameters_values()
 
         for step_i in range(self.n_steps):
-            loss_val, grads = loss_grad_fn(theta)
+            if loss_grad_fn is not None:
+                loss_val, grads = loss_grad_fn(theta)
+            else:
+                # Numerical gradient via finite differences
+                loss_val = float(jax_loss(np.array(theta)))
+                theta_np = np.array(theta)
+                grads_np = np.zeros_like(theta_np)
+                eps_fd = 1e-5
+                for i in range(len(theta)):
+                    theta_p = theta_np.copy(); theta_p[i] += eps_fd
+                    theta_m = theta_np.copy(); theta_m[i] -= eps_fd
+                    grads_np[i] = (float(jax_loss(theta_p)) - float(jax_loss(theta_m))) / (2 * eps_fd)
+                theta = jnp.array(theta_np, dtype=jnp.float64)
+                loss_val = jnp.float64(loss_val)
+                grads = jnp.array(grads_np, dtype=jnp.float64)
 
             # Adam update
             m = beta1 * m + (1 - beta1) * grads
@@ -197,22 +282,27 @@ class JAXAdamFitter(base.Fitter):
                     step_i, float(loss_val)))
 
         # ---- Restore best parameters ----
-        # Set traceable parameters via direct storage injection
-        from dysmalpy.fitting.jax_loss import _identify_traceable_params
-        reindexed, _, orig_theta_indices = _identify_traceable_params(gal.model)
-        for (cmp_name, param_name), new_idx in reindexed:
-            comp = gal.model.components[cmp_name]
-            sname = '_param_value_{}'.format(param_name)
-            object.__setattr__(comp, sname, float(best_theta[new_idx]))
-            # Also update the descriptor and numpy parameter array
-            param_desc = comp._param_instances[param_name]
-            param_desc._default = float(best_theta[new_idx])
-            if hasattr(comp, 'parameters') and hasattr(comp, 'param_names'):
-                try:
-                    idx = list(comp.param_names).index(param_name)
-                    comp.parameters[idx] = float(best_theta[new_idx])
-                except (ValueError, AttributeError):
-                    pass
+        # Use model_set.update_parameters() which correctly updates
+        # instance storage, component arrays, model_set.parameters,
+        # and evaluates tied functions.
+        if n_traceable == gal.model.nparams_free:
+            # All free params are traceable — use full theta vector
+            gal.model.update_parameters(best_theta)
+        else:
+            # Some free params are not traceable (geometry) — restore
+            # traceable params only, leave others unchanged
+            from dysmalpy.fitting.jax_loss import _identify_traceable_params
+            reindexed, _, orig_theta_indices = _identify_traceable_params(gal.model)
+            for (cmp_name, param_name), new_idx in reindexed:
+                comp = gal.model.components[cmp_name]
+                sname = '_param_value_{}'.format(param_name)
+                object.__setattr__(comp, sname, float(best_theta[new_idx]))
+                param_desc = comp._param_instances[param_name]
+                param_desc._default = float(best_theta[new_idx])
+                # Keep model_set.parameters in sync
+                key_idx = gal.model._param_keys.get(cmp_name, {}).get(param_name)
+                if key_idx is not None:
+                    gal.model.parameters[key_idx] = float(best_theta[new_idx])
 
         # Build the full best-fit parameter vector
         all_theta_best = gal.model.get_free_parameters_values()
@@ -226,6 +316,10 @@ class JAXAdamFitter(base.Fitter):
         if output_options.f_log is not None:
             logger.removeHandler(loggerfile)
             loggerfile.close()
+
+        # Re-enable JIT if it was disabled for 1D/2D fitting
+        if loss_grad_fn is None:
+            jax.config.update("jax_disable_jit", False)
 
         # ---- Package results ----
         results = JAXAdamResults(model=gal.model, blob_name=self.blob_name)
