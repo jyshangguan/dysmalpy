@@ -342,3 +342,37 @@ Phase 1 (DysmalParameter) ──┐    │
 *Phase 0-8 complete — full JAX pipeline from theta -> simulate_cube -> rebin -> convolve -> crop -> chi^2 is JIT-compilable.*
 *All 57 JAX-specific tests pass. 26/27 existing tests pass (1 pre-existing test isolation bug in test_simulate_cube).*
 *Model produces deterministic, bit-exact results (verified by dev/compare_pipelines.py).*
+
+---
+
+### Phase 9: numpy 2.x / JAX Compatibility Fixes for MPFIT Fitting Tests
+
+After the DysmalParameter migration (Phase 1-2), several regressions were exposed by numpy 2.x and JAX:
+- `fixed`/`bounds` kwargs silently ignored in `_DysmalModel.__init__` (lost during astropy→DysmalParameter migration)
+- MPFIT parinfo crashes on `None` bounds (numpy 2.x rejects `float < None`)
+- `ModelSet.__setstate__` crashes on missing `_param_metrics` attribute
+- In-place array mutation (`arr[cond] = val`) fails when arrays are JAX device arrays
+
+**Commit:** `c46d8f4` — Fix numpy 2.x and JAX array compatibility for MPFIT fitting
+
+### Phase 10: Run 2D and 3D MPFIT Fitting Tests
+
+**Goal:** Verify that `test_2D_mpfit` and `test_3D_mpfit` pass with the current code, fixing any additional regressions.
+
+**Tests:**
+- `test_2D_mpfit`: 2D velocity/dispersion map fitting. Expected: total_mass=10.8614, r_eff_disk=3.3927, fdm=0.1149, sigma0=33.4247
+- `test_3D_mpfit`: 3D data cube fitting. Expected: total_mass=10.6096, r_eff_disk=2.9857, fdm=0.4166, sigma0=70.3651
+
+**Status:** Complete
+
+**Results:**
+- `test_1D_mpfit`: PASSED (already passing from Phase 9)
+- `test_2D_mpfit`: PASSED (after fix)
+- `test_3D_mpfit`: PASSED (downloaded test data from MPE website: `gs4-43501_h250_21h30.fits.gz` + `noise_gs4-43501_h250_21h30.fits.gz`)
+
+**2D fix:** Tied parameters (set via class-level descriptor after `add_component`) can
+produce initial values outside their nominal bounds (e.g., `mvirial` computed from `fdm`
+by `tie_lmvirial_NFW` exceeds `mvirial_bounds`). MPFIT checks bounds for ALL parameters
+(including fixed ones) at startup. Fix: for parameters with a tied function on the
+class-level descriptor, set `parinfo['fixed'] = 1` and `parinfo['limited'] = [0, 0]` so
+MPFIT doesn't check their bounds.
