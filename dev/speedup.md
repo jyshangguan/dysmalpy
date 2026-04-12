@@ -63,3 +63,69 @@ python dev/benchmark_cube.py
 conda activate dysmalpy-ref
 python dev/benchmark_cube.py
 ```
+
+---
+
+## End-to-End MPFIT Fitting Timing (dev_jax vs main)
+
+**Date:** 2026-04-12
+**Platform:** CPU
+**Script:** `dev/benchmark_fitting.py`
+
+### Environment
+
+| | dev_jax (new) | main (original) |
+|--|---------------|-----------------|
+| Conda env | dysmalpy-jax | alma |
+| Python | 3.12.x | 3.12.13 |
+| numpy | 2.1.3 | 1.26.4 |
+| astropy | 7.2.0 | 5.3.4 |
+
+### Results
+
+| Case | main (s) | dev_jax (s) | Ratio (new/old) | main niter | dev_jax niter | main redchisq | dev_jax redchisq |
+|------|----------|-------------|-----------------|------------|---------------|---------------|------------------|
+| 1D | 9.36 | 27.19 | **2.91x** slower | 8 | 5 | 1.91 | 2.21 |
+| 2D | 20.89 | 33.39 | **1.60x** slower | 13 | 8 | 4.34 | 34.02 |
+| 3D | 10.56 | 16.41 | **1.55x** slower | 12 | 3 | 1.13 | 2.40 |
+
+### Analysis
+
+The `dev_jax` branch is **slower** than `main` for end-to-end MPFIT fitting on CPU.
+This is expected because:
+
+1. **The MPFIT backend is identical** — both branches use the same Cython
+   `cutils.pyx` for the inner cube population loop and the same pure-Python
+   `mpfit.py` for the Levenberg-Marquardt optimizer.
+
+2. **The overhead comes from Python-level changes**: The `dev_jax` branch
+   replaces `astropy.modeling.Parameter` with `DysmalParameter`, adds
+   numpy 2.x compatibility layers, and introduces a descriptor-based
+   parameter system. These add per-iteration overhead in parameter
+   access, bound checking, and tied parameter evaluation.
+
+3. **Convergence differs**: The two branches converge to different solutions
+   in some cases (notably 2D, where dev_jax reaches redchisq=34 vs 4.3 on
+   main), indicating that parameter system differences affect the optimization
+   path. The 1D case converges on dev_jax in fewer iterations (5 vs 8)
+   but to a slightly worse redchisq (2.21 vs 1.91).
+
+4. **The JAX speedup from the cube population benchmark (4.5x CPU, 86x GPU) is
+   not realized here** because the MPFIT fitter uses the Cython backend, not
+   JAX. The JAX gains will materialize when using `JAXAdamFitter` or a
+   future JAX-based MPFIT replacement.
+
+### How to Run
+
+```bash
+# On dev_jax branch:
+conda activate dysmalpy-jax
+JAX_PLATFORMS=cpu python dev/benchmark_fitting.py > dev/benchmark_devjax.log
+
+# On main branch:
+git stash
+git checkout main
+conda activate alma
+python dev/benchmark_fitting.py > dev/benchmark_main.log
+git checkout dev_jax
+```
