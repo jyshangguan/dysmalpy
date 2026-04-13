@@ -15,7 +15,7 @@ import numpy as np
 # import astropy.convolution as apy_conv
 from astropy.convolution.utils import discretize_model as _discretize_model
 from astropy.modeling import models as apy_models
-from scipy.signal import fftconvolve
+import jax.numpy as jnp
 import astropy.units as u
 import astropy.constants as c
 from radio_beam import Beam as _RBeam
@@ -48,6 +48,64 @@ def _truncate_kernel_to_cube(kernel, cube):
         else:
             slices.append(slice(None))
     return kernel[tuple(slices)]
+
+
+def _fft_convolve_cached(cube, kernel, cache):
+    """FFT convolution with cached, JIT-compiled kernel FFT.
+
+    Uses JAX FFT internally so the convolution is portable to GPU.
+    On the first call for a given (cube.shape, kernel) pair the kernel
+    FFT is computed and a JIT-compiled apply function is stored in *cache*.
+    Subsequent calls reuse both, avoiding repeated kernel FFT computation
+    and JAX tracing overhead.
+
+    Parameters
+    ----------
+    cube : ndarray
+        Input array (numpy or JAX array).
+    kernel : ndarray
+        Kernel array (same ndim as *cube*).
+    cache : dict
+        Mutable dict holding ``{shape_key: (kernel_fft, padded_shape,
+        apply_fn)}``.  Callers should pass a new empty dict if the kernel
+        changes.
+
+    Returns
+    -------
+    result : ndarray
+        Convolution result with the same shape as *cube* (mode='same').
+    """
+    import jax
+
+    shape_key = (cube.shape, kernel.shape)
+    cached = cache.get(shape_key)
+    if cached is None:
+        s1 = np.array(cube.shape)
+        s2 = np.array(kernel.shape)
+        padded_shape = tuple(int(x) for x in (s1 + s2 - 1))
+        crop = tuple((p - c) // 2 for p, c in zip(padded_shape, cube.shape))
+
+        kernel_jax = jnp.asarray(kernel)
+        kernel_fft = jnp.fft.rfftn(kernel_jax, s=padded_shape)
+
+        @jax.jit
+        def _apply(cube_jax, _kernel_fft=kernel_fft):
+            cube_fft = jnp.fft.rfftn(cube_jax, s=padded_shape)
+            result = jnp.fft.irfftn(cube_fft * _kernel_fft, s=padded_shape)
+            slices = tuple(slice(c, c + s) for c, s in zip(crop, cube_jax.shape))
+            return result[slices]
+
+        # Warm up the JIT compilation
+        _ = _apply(jnp.asarray(cube)).block_until_ready()
+
+        cache[shape_key] = (_apply, padded_shape)
+
+    apply_fn, padded_shape = cache[shape_key]
+    return np.asarray(apply_fn(jnp.asarray(cube)))
+    # Crop to 'same' mode (center of the full convolution)
+    start = (np.array(padded_shape) - np.array(cube.shape)) // 2
+    slices = tuple(slice(s, s + cube.shape[i]) for i, s in enumerate(start))
+    return result_full[slices]
 
 
 def _normalized_gaussian1D_kern(sigma_pixel):
@@ -123,8 +181,10 @@ class Instrument:
         self.beam = beam
         self.beam_type = beam_type
         self._beam_kernel = None
+        self._beam_fft_cache = {}
         self.lsf = lsf
         self._lsf_kernel = None
+        self._lsf_fft_cache = {}
 
         self.fov = fov
         self.spec_type = spec_type
@@ -218,7 +278,7 @@ class Instrument:
             self.set_lsf_kernel(spec_center=spec_center)
 
         kernel = _truncate_kernel_to_cube(self._lsf_kernel, cube)
-        cube_conv = fftconvolve(cube.copy(), kernel.copy(), mode='same')
+        cube_conv = _fft_convolve_cached(cube, kernel, self._lsf_fft_cache)
 
         return cube_conv
 
@@ -246,7 +306,7 @@ class Instrument:
             self.set_beam_kernel()
 
         kernel = _truncate_kernel_to_cube(self._beam_kernel, cube)
-        cube_conv = fftconvolve(cube.copy(), kernel.copy(), mode='same')
+        cube_conv = _fft_convolve_cached(cube, kernel, self._beam_fft_cache)
 
         return cube_conv
 
@@ -256,6 +316,8 @@ class Instrument:
         """
         self._beam_kernel = None
         self._lsf_kernel = None
+        self._beam_fft_cache = {}
+        self._lsf_fft_cache = {}
 
 
     def set_beam_kernel(self, support_scaling=12.):
