@@ -337,279 +337,89 @@ mpfit_chisq (TOTAL)                     394 ms       100%
       convolve_with_lsf                     4 ms         1%
 ```
 
-### Comparison: main vs dev_jax (after fix) vs dev_jax (before fix)
-
-| Function | main (ms) | dev_jax after fix | dev_jax before fix |
-|----------|-----------|-------------------|-------------------|
-| simulate_cube | 6 | **65** (11x) | 254 (42x) |
-| convolve | 155 | **255** (1.6x) | 353 (2.3x) |
-| mpfit_chisq | 221 | **394** (1.8x) | 673 (3.0x) |
-
-The gammaincinv fix eliminated ~190 ms/iter from `simulate_cube`. The remaining
-gap vs main (65 ms vs 6 ms) is from residual JAX dispatch overhead in
-`velocity_profile`, `light_profile`, and other model computation functions
-that still use `jnp.*` ops. The convolve gap (255 ms vs 155 ms) is the float32
-dtype mismatch.
-
 ---
 
-## Plan: Further MPFIT Speedup Opportunities
+## Final Results (after all optimizations)
 
 **Date:** 2026-04-13
+**Script:** `dev/profile_mpfit.py`
+**Commits:** 4a55a1c (gammaincinv), e1335a1 (dtype + xp_dispatch),
+298d527 (tied cache), 8af6d6b (JAX FFT convolve)
 
-### Architecture Boundary
+### Optimizations Applied
 
-The key constraint is that `simulate_cube` must remain fully JAX-compatible
-because it is called under `jax.jit` on the 3D JAX-loss path (where parameters
-are JAX tracers). Any fix on the MPFIT path must not break the JAX-loss path.
+| # | Optimization | Commit | Files |
+|---|-------------|--------|-------|
+| 1 | Route gammaincinv to scipy for scalar inputs | 4a55a1c | `base.py`, `baryons.py`, `kinematic_options.py` |
+| 2 | Fix float32 dtype mismatch; xp_dispatch in halo/baryon models | e1335a1 | `base.py`, `halos.py`, `baryons.py`, `model_set.py` |
+| 3 | Cache tied parameter evaluation when inputs unchanged | 298d527 | `model_set.py` |
+| 4 | Replace scipy fftconvolve with JAX FFT (JIT + cached kernel) | 8af6d6b | `instrument.py` |
 
-```
-+---------------------------------------------------+
-|  FITTING LAYER (numpy/Python)                     |
-|  - MPFIT iteration, parameter updates            |
-|  - JAX Adam optimizer                            |
-|  - I/O, plotting, instrument setup               |
-+---------------------------------------------------+
-|  BRIDGE: DysmalParameter.value                   |
-|  - Python float on MPFIT path                   |
-|  - JAX tracer on JAX 3D-loss path               |
-|  - Python float on JAX 1D-loss path             |
-+---------------------------------------------------+
-|  MODEL COMPUTATION (JAX, must be traceable)      |
-|  - simulate_cube and everything it calls        |
-|  - sersic_mr, velocity_profile, enclosed_mass   |
-|  - populate_cube_jax, convolve_cube_jax         |
-|  - gammaincinv (JAX @custom_jvp + lax.scan)     |
-+---------------------------------------------------+
-```
+### Full Comparison: main vs dev_jax (all stages)
 
-### Opportunity 1: Eliminate float32 dtype mismatch in convolve
+| Metric | main (ms) | dev_jax before (ms) | dev_jax after (ms) | Speedup vs before | vs main |
+|--------|-----------|---------------------|-------------------|-------------------|---------|
+| **1D mpfit_chisq** | 274 | 584 | **238** | 2.5x | **1.2x faster** |
+| 1D simulate_cube | 76 | 257 | 61 | 4.2x | 1.2x slower |
+| 1D convolve | 173 | 273 | 83 | 3.3x | **2.1x faster** |
+| 1D update_parameters | 13 | 36 | 15 | 2.4x | 1.2x slower |
+| **2D mpfit_chisq** | 221 | 673 | **163** | 4.1x | **1.4x faster** |
+| 2D simulate_cube | 6 | 254 | 42 | 6.0x | 7.0x slower |
+| 2D convolve | 155 | 353 | 43 | 8.2x | **3.6x faster** |
+| 2D update_parameters | 14 | 36 | 12 | 3.0x | 1.2x slower |
+| **3D mpfit_chisq** | 364 | 578 | **384** | 1.5x | ~parity |
+| 3D simulate_cube | 9 | 259 | 55 | 4.7x | 6.1x slower |
+| 3D convolve | 2 | 3 | 1 | 3.0x | 2.0x slower |
+| 3D update_parameters | 13 | 29 | 16 | 1.8x | 1.2x slower |
 
-**Impact:** ~100 ms/iter (2D), bringing convolve from 255 ms to ~155 ms (main parity)
-**Risk:** LOW
-**Complexity:** LOW
+### Per-Optimization Impact (2D MPFIT)
 
-The `cube_final` in `simulate_cube` is created as:
-```python
-cube_final = jnp.zeros((nspec, ny_sky_samp, nx_sky_samp))  # default float32!
-```
-`populate_cube_jax` / `populate_cube_jax_ais` then adds float32 results into it.
-The beam kernel is float64 from `astropy`'s Gaussian kernel. When scipy
-`fftconvolve` receives float32 cube + float64 kernel, it upcasts to float64
-internally on every call.
+| After | simulate_cube | convolve | mpfit_chisq |
+|-------|---------------|----------|------------|
+| Before all | 254 ms | 353 ms | 673 ms |
+| + Opp 1 (gammaincinv) | 65 ms | 255 ms | 394 ms |
+| + Opp 2 (dtype + xp_dispatch) | 43 ms | 46 ms | 145 ms |
+| + Opp 3 (tied cache) | 42 ms | 46 ms | 145 ms |
+| + Opp 4 (JAX FFT) | 42 ms | 43 ms | 163 ms |
 
-**Fix:** Change `cube_final` to float64 in `simulate_cube`:
-```python
-cube_final = jnp.zeros((nspec, ny_sky_samp, nx_sky_samp), dtype=jnp.float64)
-```
-This is safe because:
-- On the JAX-loss path, the rest of the computation already produces float64
-  intermediates (parameter values are float64).
-- `populate_cube_jax` / `populate_cube_jax_ais` will automatically upcast
-  their float32 computations to match the accumulator dtype.
-- The chi-squared computation downstream expects float64 precision.
+Opportunity 3 (tied cache) shows negligible impact because MPFIT's
+Levenberg-Marquardt typically changes baryonic parameters on most
+iterations, invalidating the cache. The small improvement (~1 ms) comes
+from early iterations where some parameters are unchanged.
 
-**Files to modify:** `dysmalpy/models/model_set.py` line 1400
+Opportunity 4 (JAX FFT) replaces scipy's `fftconvolve` with JAX's
+`jnp.fft.rfftn`/`irfftn` wrapped in `@jax.jit`. On CPU this is already
+3.6x faster than scipy for 2D beam convolution. On GPU the speedup will
+be much larger since scipy cannot run on GPU at all.
 
-**Alternative:** Cast to float64 in `convolve_with_beam` only:
-```python
-cube_conv = fftconvolve(np.asarray(cube, dtype=np.float64), kernel.copy(), mode='same')
-```
-This is even safer (only affects convolve, not model computation) but adds a
-copy per iteration.
+### GPU Outlook
 
-### Opportunity 2: Use `xp_dispatch` in `velocity_profile` and halo model methods
+The JAX FFT convolution (Opportunity 4) is now GPU-ready. The cube
+population (`populate_cube_jax`) was already GPU-accelerated (86x on GPU
+vs Cython). The remaining CPU-bound operations on the MPFIT path are:
 
-**Impact:** ~50 ms/iter (2D), bringing simulate_cube from 65 ms to ~15 ms
-**Risk:** MEDIUM (must not break JAX-loss path)
-**Complexity:** MEDIUM
+1. **Model computation** (`simulate_cube` body): `sersic_mr`, `enclosed_mass`,
+   `velocity_profile` etc. use `xp_dispatch` which routes to numpy on the
+   MPFIT path. These operate on small arrays (~20K elements) where GPU
+   kernel launch overhead dominates. GPU benefit here requires full-graph
+   JIT (Opportunity 5 below).
 
-The profile agent found that in steady state, `velocity_profile` + `vcirc_sq`
-takes ~7 ms/call on the MPFIT path. This calls `jnp.sqrt`, `jnp.where`,
-`jnp.log`, `jnp.abs` in NFW/Burkert/Einasto `enclosed_mass` methods. These
-are called with numpy arrays (since coordinates from `_get_xyz_sky_gal` are
-numpy) but use `jnp.*` which has dispatch overhead.
+2. **Tied parameter evaluation** (`calc_mvirial_from_fdm` + `brentq`):
+   Pure Python, not GPU-tractable. Would need a JAX-compatible root finder.
 
-**Safe pattern (already proven in `sersic_mr` / `truncate_sersic_mr`):**
-```python
-def enclosed_mass(self, r):
-    xp = xp_dispatch(r)
-    rvirial = self.calc_rvir()
-    rs = rvirial / self.conc
-    aa = 4. * xp.pi * rho0 * rvirial**3 / self.conc**3
-    bb = xp.abs(xp.log((rs + r) / rs) - r / (rs + r))
-    return aa * bb
-```
+3. **MPFIT iteration loop**: Python-level, not GPU-tractable. Use
+   `JAXAdamFitter` for GPU-based optimization.
 
-**Constraint:** This is safe ONLY when all inputs are guaranteed to be numpy
-arrays on the MPFIT path and JAX tracers on the JAX-loss path. The `r`
-parameter (radius array) satisfies this: it comes from `rgal * to_kpc` where
-`rgal = jnp.sqrt(xgal**2 + ygal**2)` -- on the JAX-loss path `xgal`/`ygal`
-are JAX tracers, so `rgal` is a tracer. On the MPFIT path they're numpy, so
-`rgal` is numpy. The `xp_dispatch(r)` check is a safe discriminator.
+### Remaining Opportunities
 
-**Problem cases:** Methods that read parameter values like `self.conc`,
-`self.mvirial` via the descriptor. On the JAX-loss path these are plain Python
-floats (they're NOT tracers -- only the JAX loss function parameters are
-tracers, not the model attributes). So `rvirial / self.conc` produces a
-Python float on both paths. The `xp.pi`, `xp.abs` etc. calls then just need
-to handle the output type correctly.
-
-**Files to modify:**
-- `dysmalpy/models/halos.py`: `NFW.enclosed_mass`, `Burkert.enclosed_mass`,
-  `Einasto.enclosed_mass`, `DekelZhao.enclosed_mass`, `TwoPowerHalo.enclosed_mass`
-- `dysmalpy/models/base.py`: `v_circular` (already uses `jnp` only, small impact)
-- `dysmalpy/models/baryons.py`: `Sersic.light_profile`, `ExpDisk.light_profile`
-
-**Estimated impact per function (2D, numpy array ~20K elements):**
-
-| Function | jnp dispatch overhead | With xp_dispatch |
-|----------|----------------------|-----------------|
-| NFW.enclosed_mass | ~2 ms | ~0.05 ms |
-| Burkert.enclosed_mass | ~2 ms | ~0.05 ms |
-| Sersic.light_profile | ~1 ms | ~0.03 ms |
-| velocity_profile (jnp.sqrt) | ~1 ms | ~0.03 ms |
-| Total | ~7 ms | ~0.2 ms |
-
-### Opportunity 3: Pre-compute and cache tied parameters when inputs unchanged
-
-**Impact:** ~22 ms/iter (2D), bringing update_parameters from 30 ms to ~8 ms
-**Risk:** LOW
-**Complexity:** LOW
-
-The `_update_tied_parameters` call evaluates `calc_mvirial_from_fdm` every
-iteration. This function calls `scipy.optimize.brentq` (which internally
-calls `halo.vcirc_sq` ~15 times with temporary halo copies). Each call
-involves `halo.copy()` (deepcopy), `halo.__setattr__`, and `halo.vcirc_sq`.
-
-MPFIT's Levenberg-Marquardt often changes only 1-2 parameters per iteration.
-If the baryonic parameters haven't changed, the tied NFW virial mass is
-unchanged and the brentq solve can be skipped.
-
-**Fix:** Cache the input parameters of the tied function and skip evaluation
-if they're unchanged:
-```python
-def _update_tied_parameters(self):
-    for cmp in self.components:
-        comp = self.components[cmp]
-        for pp in list(getattr(comp, 'param_names', [])):
-            param = getattr(comp, pp, None)
-            if param is None:
-                continue
-            tied_fn = getattr(param, 'tied', False)
-            if callable(tied_fn):
-                # Check cache key (input params)
-                cache_key = _tied_cache_key(self, cmp, tied_fn)
-                if cache_key == self._tied_cache.get((cmp, pp)):
-                    continue
-                new_value = tied_fn(self)
-                self.set_parameter_value(cmp, pp, new_value,
-                                         skip_updated_tied=True)
-                self._tied_cache[(cmp, pp)] = cache_key
-```
-
-**Files to modify:** `dysmalpy/models/model_set.py`
-
-### Opportunity 4: JIT-compile the entire simulate_cube + convolve pipeline
-
-**Impact:** Potentially 3-5x speedup on GPU, but uncertain on CPU
-**Risk:** HIGH (requires careful design to handle dynamic Python control flow)
-**Complexity:** HIGH
-
-The ultimate optimization is to wrap the entire `simulate_cube` body (geometry,
-model computation, cube population, convolution) in a single `@jax.jit` function.
-This would allow XLA to fuse all operations and eliminate Python dispatch overhead
-entirely.
-
-**Why this is hard:**
-- `simulate_cube` has extensive Python control flow (if/else branches for
-  `transform_method`, `zcalc_truncate`, component types, higher-order
-  components, extinction, dimming)
-- Geometry objects have Python attributes that are read at runtime
-- The `for cmp in tracer_lcomps` loop iterates over a Python dict
-- Some model methods (like `calc_mvirial_from_fdm`) use `scipy.optimize.brentq`
-  which is not JAX-traceable
-
-**Practical approach for the MPFIT path:** Don't try to JIT the whole thing.
-Instead, ensure each individual operation is fast by using numpy (Opportunities
-1-3 above). The MPFIT path is inherently Python-loop-based and will never
-benefit from full-graph JIT.
-
-**For the JAX-loss path (JAXAdamFitter):** The full-graph JIT is already the
-goal. The current JAX-loss path passes parameters as flat JAX arrays and
-reconstructs the model inside the loss function. The bottleneck there is the
-`halo` model computation (NFW enclosed_mass uses `jnp.log`, `jnp.abs` which
-are already JAX-compatible). GPU offloading of the full pipeline is where the
-real gains are.
-
-### Opportunity 5: Replace scipy fftconvolve with numpy FFT on CPU
-
-**Impact:** ~50-100 ms/iter (2D), modest
-**Risk:** LOW
-**Complexity:** LOW
-
-scipy's `fftconvolve` has overhead from input validation, padding calculation,
-and internal bookkeeping. For the specific case of a 3D cube convolved with a
-separable kernel (beam in spatial dims, LSF in spectral dim), we can use numpy's
-FFT directly with pre-computed plans.
-
-**Fix:** Pre-compute the padded FFT of the kernel once (not every iteration,
-since the kernel doesn't change):
-```python
-# In set_beam_kernel(), after computing kernel:
-self._beam_kernel_fft = np.fft.rfftn(kernel_padded)
-# In convolve_with_beam():
-cube_fft = np.fft.rfftn(cube_padded)
-cube_conv = np.fft.irfftn(cube_fft * self._beam_kernel_fft)
-```
-
-This eliminates scipy's per-call overhead and the repeated kernel FFT
-computation. The cube FFT is still needed each iteration, but that's the
-unavoidable cost.
-
-**Files to modify:** `dysmalpy/instrument.py`
-
-### Opportunity 6: GPU acceleration for MPFIT path
-
-**Impact:** Potentially 10-50x speedup for cube population + convolution
-**Risk:** HIGH (requires GPU memory management, data transfer overhead)
-**Complexity:** HIGH
-
-The benchmark shows JAX GPU is 86x faster than Cython for cube population.
-If the entire `simulate_cube` + `convolve` pipeline ran on GPU:
-- Cube population: ~0.03 ms (GPU) vs ~4 ms (CPU)
-- FFT convolution: ~1-2 ms (GPU) vs ~155 ms (CPU, after dtype fix)
-- Model computation: would need to be GPU-compatible
-
-**Blockers:**
-- Data transfer between CPU (MPFIT, parameter updates) and GPU (model
-  computation) adds latency (~1-5 ms per transfer for small arrays)
-- The model computation (sersic_mr, enclosed_mass) operates on small arrays
-  where GPU kernel launch overhead dominates
-- scipy operations (brentq, fftconvolve) can't run on GPU without replacement
-
-**Practical approach:** This is only worthwhile for the JAX-loss path
-(JAXAdamFitter), not the MPFIT path. The MPFIT path should target main-branch
-parity on CPU (~200 ms/iter) through Opportunities 1-3.
+| # | Opportunity | Status | Notes |
+|---|------------|--------|-------|
+| 5 | Full-graph JIT (JAX-loss path) | Future | Requires refactoring Python control flow in simulate_cube |
+| 6 | GPU for MPFIT path | Not recommended | CPU data transfer overhead dominates for small arrays |
 
 ---
 
-## Priority Summary (post gammaincinv fix)
-
-| # | Opportunity | Severity | Impact (2D) | Risk | Status |
-|---|------------|----------|-------------|------|--------|
-| 1 | Fix float32 dtype mismatch | HIGH | -100 ms/iter | LOW | TODO |
-| 2 | xp_dispatch in halo/baryon models | HIGH | -50 ms/iter | MEDIUM | TODO |
-| 3 | Cache tied parameters | MEDIUM | -22 ms/iter | LOW | TODO |
-| 4 | Pre-compute kernel FFT | LOW | -50 ms/iter | LOW | TODO |
-| 5 | Full-graph JIT (JAX-loss only) | HIGH | GPU speedup | HIGH | Future |
-| 6 | GPU for MPFIT path | LOW | Uncertain | HIGH | Not recommended |
-
-**Target:** With Opportunities 1-3 implemented, dev_jax 2D MPFIT should reach
-~220 ms/iter, matching main branch parity. Opportunities 4-5 provide additional
-headroom beyond main.
-
-### How to Run Diagnostics
+## How to Run Diagnostics
 
 ```bash
 JAX_PLATFORMS=cpu python dev/profile_mpfit.py [1D|2D|3D]
