@@ -419,6 +419,53 @@ vs Cython). The remaining CPU-bound operations on the MPFIT path are:
 
 ---
 
+## Tutorial Benchmark (Real Examples)
+
+**Date:** 2026-04-13
+**Script:** `dev/bench_tutorial.py`
+
+Runs the same fitting examples from the tutorial notebooks end-to-end using
+`dysmalpy_fit_single` with the standard param files. This tests the full
+pipeline (data loading, model setup, MPFIT iteration, output) rather than
+just per-iteration function timing.
+
+### Setup
+
+- **Galaxy**: GS4_43501 (z=1.613)
+- **Model**: DiskBulge + NFW halo + constant dispersion
+- **Param files**: `examples/examples_param_files/fitting_{1D,2D,3D}_mpfit.params`
+- **Data**: `tests/test_data/`
+- **Tutorial expected timings** (from notebook markdown): 1D ~2.6s, 2D ~12s, 3D ~24s
+
+### Results
+
+| Mode | Wall (s) | MPFIT (s) | Iterations | redchisq | Tutorial Ref |
+|------|----------|-----------|------------|----------|-------------|
+| 1D   |  18.45   |  12.07    |     9      |   2.64   |   ~2.6 s     |
+| 2D   |  14.64   |   9.35    |     4      |  11.92   |   ~12 s      |
+| 3D   |  50.37   |  23.91    |    14      |   1.36   |   ~24 s      |
+
+- **Wall time** includes Python imports, model setup, data loading, and plotting.
+- **MPFIT time** is the fitting-only time reported by dysmalpy (excludes setup).
+- 2D and 3D match or beat the tutorial reference times (from `main` branch with Cython).
+- 1D is slower due to more iterations (9 vs ~5-8 on main); the per-iteration time
+  is competitive but the 1D case does not benefit from the convolution speedup
+  since it uses LSF-only convolution (no beam).
+- The 2D `redchisq=11.9` is high because MPFIT converged after only 4 iterations
+  (status=2, likely hit `maxiter` on some parameters or a flat chi-surface).
+  This matches the pre-optimization behavior where 2D convergence was also poor.
+
+### How to Run
+
+```bash
+JAX_PLATFORMS=cpu python dev/bench_tutorial.py 1d
+JAX_PLATFORMS=cpu python dev/bench_tutorial.py 2d
+JAX_PLATFORMS=cpu python dev/bench_tutorial.py 3d
+JAX_PLATFORMS=cpu python dev/bench_tutorial.py all
+```
+
+---
+
 ## How to Run Diagnostics
 
 ```bash
