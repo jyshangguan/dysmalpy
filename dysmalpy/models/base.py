@@ -30,9 +30,10 @@ except:
 from dysmalpy.special.gammaincinv import gammaincinv
 
 __all__ = ['MassModel', 'LightModel',
+           'xp_dispatch',
            'HigherOrderKinematicsSeparate', 'HigherOrderKinematicsPerturbation',
            'v_circular', 'menc_from_vcirc', 'sersic_mr', 'truncate_sersic_mr',
-           '_I0_gaussring']
+           '_I0_gaussring', '_safe_gammaincinv']
 
 
 # ---------------------------------------------------------------------------
@@ -809,6 +810,37 @@ def menc_from_vcirc(vcirc, r):
     return vcirc ** 2 * r / G_PC_MSUN_KMSQ_EFF
 
 
+def xp_dispatch(r):
+    """Return jnp if *r* is a JAX array/tracer, else np.
+
+    Use at the top of any function that receives an array and calls ``jnp.*``
+    ops on it.  On the MPFIT path the input will be a plain numpy array and
+    ``np.exp`` etc. have zero dispatch overhead for small grids.  On the
+    JAX-loss path the input will be a JAX tracer and ``jnp.exp`` is required
+    for XLA tracing.
+    """
+    return jnp if isinstance(r, jnp.ndarray) else np
+
+
+def _safe_gammaincinv(two_n, p=0.5):
+    """Use scipy for scalar floats, JAX for tracers/arrays.
+
+    On the MPFIT path the Sersic index ``n`` is a plain Python float, so
+    ``two_n`` is also a float.  Calling the JAX ``gammaincinv``
+    (``@jax.custom_jvp`` backed by ``lax.scan``) with scalar floats still
+    triggers full XLA tracing (~174 ms/call).  Routing to
+    ``scipy.special.gammaincinv`` instead eliminates that overhead.
+
+    On the JAX 3D-loss path ``n`` is a JAX tracer, so ``two_n`` is a
+    ``jnp.ndarray`` and we fall through to the JAX implementation which
+    supports automatic differentiation.
+    """
+    if not isinstance(two_n, jnp.ndarray) and not isinstance(p, jnp.ndarray):
+        from scipy.special import gammaincinv as _scipy_gi
+        return _scipy_gi(float(two_n), float(p))
+    return gammaincinv(two_n, p)
+
+
 def sersic_mr(r, mass, n, r_eff):
     """
     Radial surface mass density function for a generic sersic model
@@ -832,14 +864,15 @@ def sersic_mr(r, mass, n, r_eff):
     mr : float or array
         Surface mass density as a function of `r`
     """
-    bn = gammaincinv(2. * n, 0.5)
+    xp = xp_dispatch(r)
 
-    two_n = 2.0 * n
-    I0 = (mass * bn ** two_n
-          / (2.0 * jnp.pi * r_eff ** 2 * n * gamma(two_n)))
+    bn = _safe_gammaincinv(2.0 * n, 0.5)
+
+    I0 = (mass * bn ** (2.0 * n)
+          / (2.0 * xp.pi * r_eff ** 2 * n * gamma(2.0 * n)))
 
     x = (r / r_eff) ** (1.0 / n)
-    mr = I0 * jnp.exp(-bn * x)
+    mr = I0 * xp.exp(-bn * x)
 
     return mr
 
@@ -875,7 +908,8 @@ def truncate_sersic_mr(r, mass, n, r_eff, r_inner, r_outer):
     """
     mr = sersic_mr(r, mass, n, r_eff)
 
-    mr = jnp.where((r >= r_inner) & (r <= r_outer), mr, 0.)
+    xp = xp_dispatch(r)
+    mr = xp.where((r >= r_inner) & (r <= r_outer), mr, 0.)
 
     return mr
 
