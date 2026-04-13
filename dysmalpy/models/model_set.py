@@ -403,6 +403,9 @@ class ModelSet:
 
             self.parameters = np.concatenate([self.parameters,
                                               model.parameters])
+
+        # Invalidate tied-parameter cache since component structure changed
+        self._tied_cache_key = None
         self.param_names[model.name] = model.param_names
         self.tied[model.name] = model.tied
         self.fixed[model.name] = model.fixed
@@ -549,12 +552,27 @@ class ModelSet:
         was assigned *after* ``add_component`` (e.g. ``zh.sigmaz.tied = fn``),
         because the descriptor object itself holds the reference.
 
+        Performance: If no parameter values have changed since the last
+        call, the entire evaluation is skipped.  This avoids redundant
+        ``calc_mvirial_from_fdm`` / ``brentq`` solves (~22 ms each) when
+        MPFIT changes only a subset of parameters that don't affect
+        the tied parameter inputs.
+
         Notes
         -----
         Also invoked at the beginning of :meth:`ModelSet.simulate_cube`
         to ensure the correct tied parameters are used if not set using
         :meth:`ModelSet.update_parameters`.
         """
+        # Fast path: skip if the parameter array hasn't changed.
+        if self.parameters is not None:
+            params_bytes = self.parameters.tobytes()
+            if getattr(self, '_tied_cache_key', None) == params_bytes:
+                return
+            self._tied_cache_key = params_bytes
+        else:
+            self._tied_cache_key = None
+
         for cmp in self.components:
             comp = self.components[cmp]
             for pp in list(getattr(comp, 'param_names', [])):
