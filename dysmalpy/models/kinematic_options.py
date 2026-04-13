@@ -16,7 +16,7 @@ import jax.numpy as jnp
 
 # Local imports
 from .baryons import DiskBulge, LinearDiskBulge, Sersic, ExpDisk
-from dysmalpy.special import gammaincinv
+from .base import _safe_gammaincinv
 
 __all__ = ['KinematicOptions']
 
@@ -521,7 +521,7 @@ class KinematicOptions:
         elif self.pressure_support_type == 2:
             # Modified derivation that takes into account n_disk / n
             pn = self.get_pressure_support_param(model, param='n')
-            bn = gammaincinv(2. * pn, 0.5)
+            bn = _safe_gammaincinv(2. * pn, 0.5)
 
             vel_asymm_drift_sq = 2. * (bn/pn) * jnp.power((r/pre), 1./pn) * sigma**2
 

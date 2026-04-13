@@ -1397,7 +1397,7 @@ class ModelSet:
             line_center_conv = self.line_center.to(spec_unit).value
             vx = (spec - line_center_conv) / line_center_conv * c_km_s
 
-        cube_final = jnp.zeros((nspec, ny_sky_samp, nx_sky_samp))
+        cube_final = jnp.zeros((nspec, ny_sky_samp, nx_sky_samp), dtype=jnp.float64)
 
 
         # First construct the cube based on mass components

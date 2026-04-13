@@ -19,6 +19,9 @@ import jax.numpy as jnp
 import jax.scipy.special
 
 # Local imports
+from .base import xp_dispatch
+
+# Local imports
 from .model_set import ModelSet
 from .base import MassModel, G_PC_MSUN_KMSQ_EFF
 from dysmalpy.parameters import DysmalParameter
@@ -406,14 +409,15 @@ class NFW(DarkMatterHalo):
         menc : float or array
             Enclosed mass in solar units
         """
+        xp = xp_dispatch(r)
 
         rvirial = self.calc_rvir()
         rho0 = self.calc_rho0(rvirial=rvirial)
         rs = rvirial/self.conc
-        aa = 4.*jnp.pi*rho0*rvirial**3/self.conc**3
+        aa = 4.*xp.pi*rho0*rvirial**3/self.conc**3
 
         # For very small r, bb can be negative.
-        bb = jnp.abs(jnp.log((rs + r)/rs) - r/(rs + r))
+        bb = xp.abs(xp.log((rs + r)/rs) - r/(rs + r))
 
         return aa*bb
 
@@ -520,6 +524,7 @@ class TwoPowerHalo(DarkMatterHalo):
         menc : float or array
             Enclosed mass in solar units
         """
+        xp = xp_dispatch(r)
 
         rvirial = self.calc_rvir()
         rs = rvirial/self.conc
@@ -672,8 +677,9 @@ class Burkert(DarkMatterHalo):
         return rho0 / ((1 + r/rB) * (1 + (r/rB)**2))
 
     def I(self, r):
-        Ival = 0.25 * (jnp.log(r**2 + self.rB**2) + 2.*jnp.log(r + self.rB)
-                       - 2.*jnp.arctan(r/self.rB) - 4.*jnp.log(self.rB))
+        xp = xp_dispatch(r)
+        Ival = 0.25 * (xp.log(r**2 + self.rB**2) + 2.*xp.log(r + self.rB)
+                       - 2.*xp.arctan(r/self.rB) - 4.*xp.log(self.rB))
         return Ival
 
     def enclosed_mass(self, r):
@@ -884,13 +890,14 @@ class Einasto(DarkMatterHalo):
         if self.Einasto_param.lower() == 'alphaeinasto':
             nEinasto = 1./alphaEinasto
 
+        xp = xp_dispatch(r)
         rvirial = self.calc_rvir()
         rho0 = self.calc_rho0(rvirial=rvirial)
         rs = rvirial / conc
-        h = rs / jnp.power(2.*nEinasto, nEinasto)
+        h = rs / xp.power(2.*nEinasto, nEinasto)
 
         # Return the density at a given radius:
-        return rho0 * jnp.exp(- jnp.power(r/h, 1./nEinasto))
+        return rho0 * xp.exp(- xp.power(r/h, 1./nEinasto))
 
         # Equivalent to:
         #  rho0 * np.exp( - 2 * nEinasto * ( np.power(r/rs, 1./nEinasto) -1.) )
@@ -911,17 +918,19 @@ class Einasto(DarkMatterHalo):
         menc : float or array
             Enclosed mass in solar units
         """
+        xp = xp_dispatch(r)
+
         rvirial = self.calc_rvir()
         rs = rvirial/self.conc
-        h = rs / jnp.power(2.*self.nEinasto, self.nEinasto)
+        h = rs / xp.power(2.*self.nEinasto, self.nEinasto)
 
         rho0 = self.calc_rho0(rvirial=rvirial)
 
         # Explicitly substituted for s = r/h before doing s^(1/nEinasto)
-        incomp_gam =  jax.scipy.special.gammainc(3*self.nEinasto, 2.*self.nEinasto * jnp.power(r/rs, 1./self.nEinasto) ) \
+        incomp_gam =  jax.scipy.special.gammainc(3*self.nEinasto, 2.*self.nEinasto * xp.power(r/rs, 1./self.nEinasto) ) \
                         * jax.scipy.special.gamma(3*self.nEinasto)
 
-        Menc = 4.*jnp.pi * rho0 * jnp.power(h, 3.) * self.nEinasto * incomp_gam
+        Menc = 4.*xp.pi * rho0 * xp.power(h, 3.) * self.nEinasto * incomp_gam
 
         return Menc
 
@@ -1133,6 +1142,7 @@ class DekelZhao(DarkMatterHalo):
 
     def evaluate(self, r, mvirial, s1, c2, fdm):
         """ Mass density for the DekelZhao halo profile"""
+        xp = xp_dispatch(r)
 
         rvirial = self.calc_rvir()
         a, c = self.calc_a_c()
@@ -1141,7 +1151,7 @@ class DekelZhao(DarkMatterHalo):
         rc = rvirial / c
         x = r / rc
 
-        return rhoc / (jnp.power(x, a) * jnp.power((1.+jnp.sqrt(x)), 2.*(3.5-a)))
+        return rhoc / (xp.power(x, a) * xp.power((1.+xp.sqrt(x)), 2.*(3.5-a)))
 
     def enclosed_mass(self, r):
         """
@@ -1157,6 +1167,8 @@ class DekelZhao(DarkMatterHalo):
         menc : float or array
             Enclosed mass in solar units
         """
+        xp = xp_dispatch(r)
+
         mvir = 10**self.mvirial
         rvirial = self.calc_rvir()
         a, c = self.calc_a_c()
@@ -1165,7 +1177,7 @@ class DekelZhao(DarkMatterHalo):
         x = r / rc
         mu = self.calc_mu(a=a, c=c)
 
-        return mu * mvir / (jnp.power(x, a-3.)*jnp.power((1.+jnp.sqrt(x)), 2.*(3.-a)))
+        return mu * mvir / (xp.power(x, a-3.)*xp.power((1.+xp.sqrt(x)), 2.*(3.-a)))
 
     def calc_a_c(self):
         r"""
@@ -1318,14 +1330,15 @@ class LinearNFW(DarkMatterHalo):
         menc : float or array
             Enclosed mass in solar units
         """
+        xp = xp_dispatch(r)
 
         rvirial = self.calc_rvir()
         rho0 = self.calc_rho0(rvirial=rvirial)
         rs = rvirial/self.conc
-        aa = 4.*jnp.pi*rho0*rvirial**3/self.conc**3
+        aa = 4.*xp.pi*rho0*rvirial**3/self.conc**3
 
         # For very small r, bb can be negative.
-        bb = jnp.abs(jnp.log((rs + r)/rs) - r/(rs + r))
+        bb = xp.abs(xp.log((rs + r)/rs) - r/(rs + r))
 
         return aa*bb
 

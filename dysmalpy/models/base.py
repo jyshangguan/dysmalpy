@@ -787,7 +787,8 @@ def v_circular(mass_enc, r):
     vcirc : float or array
         Circular velocity in km/s as a function of radius
     """
-    return jnp.sqrt(jnp.where(r > 0, G_PC_MSUN_KMSQ_EFF * mass_enc / jnp.maximum(r, 1e-10), 0.))
+    xp = xp_dispatch(r)
+    return xp.sqrt(xp.where(r > 0, G_PC_MSUN_KMSQ_EFF * mass_enc / xp.maximum(r, 1e-10), 0.))
 
 
 def menc_from_vcirc(vcirc, r):

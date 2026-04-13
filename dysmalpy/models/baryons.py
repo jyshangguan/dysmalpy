@@ -23,10 +23,11 @@ from astropy.table import Table
 
 # Local imports
 from .base import MassModel, _LightMassModel, v_circular, \
-                  sersic_mr, _I0_gaussring, G_PC_MSUN_KMSQ_EFF
+                  sersic_mr, _I0_gaussring, G_PC_MSUN_KMSQ_EFF, \
+                  _safe_gammaincinv, xp_dispatch
 # from .base import menc_from_vcirc
 from dysmalpy.parameters import DysmalParameter
-from dysmalpy.special import bessel_k0, bessel_k1, gammaincinv
+from dysmalpy.special import bessel_k0, bessel_k1
 
 __all__ = ['Sersic', 'DiskBulge', 'LinearDiskBulge', 'ExpDisk', 'BlackHole',
            'GaussianRing',
@@ -105,10 +106,11 @@ def menc_exp_disk(r, mass, rd):
     menc : float or array
         Enclosed mass of an exponential disk for the given `r`
     """
+    xp = xp_dispatch(r)
 
-    Sig0 = mass / (2. * jnp.pi * rd**2)
+    Sig0 = mass / (2. * xp.pi * rd**2)
 
-    menc = 2. * jnp.pi * Sig0 * rd**2 * ( 1 - jnp.exp(-r/rd)*(1.+r/rd) )
+    menc = 2. * xp.pi * Sig0 * rd**2 * ( 1 - xp.exp(-r/rd)*(1.+r/rd) )
 
     return menc
 
@@ -145,9 +147,10 @@ def vcirc_exp_disk(r, mass, rd):
 
     VCsq = 2.0 * G_PC_MSUN_KMSQ_EFF * mass / rd * y**2 * bessel_term
 
-    VCsq = jnp.where(r > 0, VCsq, 0.0)
+    xp = xp_dispatch(r)
+    VCsq = xp.where(r > 0, VCsq, 0.0)
 
-    return jnp.sqrt(VCsq)
+    return xp.sqrt(VCsq)
 
 
 def sersic_menc_2D_proj(r, mass, n, r_eff):
@@ -178,7 +181,7 @@ def sersic_menc_2D_proj(r, mass, n, r_eff):
     This function is only valid in the case of an infinite cylinder
     """
 
-    bn = gammaincinv(2. * n, 0.5)
+    bn = _safe_gammaincinv(2. * n, 0.5)
     integ = gammainc(2 * n, bn * (r / r_eff) ** (1. / n))
     norm = mass
     menc = norm*integ
@@ -1317,7 +1320,7 @@ class Sersic(MassModel, _LightMassModel):
                 dlnrhogas_dlnr_arr = self.noord_flattener.dlnrho_dlnr(r, self.r_eff)
 
             else:
-                bn = gammaincinv(2. * self.n, 0.5)
+                bn = _safe_gammaincinv(2. * self.n, 0.5)
                 dlnrhogas_dlnr_arr = -2. * (bn / self.n) * jnp.power(r/self.r_eff, 1./self.n)
         else:
             dlnrhogas_dlnr_arr = r * 0.
@@ -1892,7 +1895,7 @@ class DiskBulge(MassModel, _LightMassModel):
             dlnrhogas_dlnr_arr = self.noord_flattener_disk.dlnrho_dlnr(r, self.r_eff_disk)
             return dlnrhogas_dlnr_arr
         else:
-            bn = gammaincinv(2. * self.n_disk, 0.5)
+            bn = _safe_gammaincinv(2. * self.n_disk, 0.5)
             return -2. * (bn / self.n_disk) * jnp.power(r/self.r_eff_disk, 1./self.n_disk)
 
     def dlnrhogas_dlnr_bulge(self, r):
@@ -1905,7 +1908,7 @@ class DiskBulge(MassModel, _LightMassModel):
 
             return dlnrhogas_dlnr_arr
         else:
-            bn = gammaincinv(2. * self.n_bulge, 0.5)
+            bn = _safe_gammaincinv(2. * self.n_bulge, 0.5)
             return -2. * (bn / self.n_bulge) * jnp.power(r/self.r_eff_bulge, 1./self.n_bulge)
 
     def dlnrhogas_dlnr(self, r):
