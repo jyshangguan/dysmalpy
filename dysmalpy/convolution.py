@@ -136,12 +136,14 @@ def convolve_cube_jax(cube, beam_kernel=None, lsf_kernel=None):
     cube = jnp.asarray(cube)
 
     if beam_kernel is not None:
-        beam_kernel = _crop_kernel(np.asarray(beam_kernel), np.asarray(cube))
-        cube = _fft_convolve_3d(cube, jnp.asarray(beam_kernel))
+        beam_kernel = jnp.asarray(beam_kernel)
+        beam_kernel = _crop_kernel(beam_kernel, cube)
+        cube = _fft_convolve_3d(cube, beam_kernel)
 
     if lsf_kernel is not None:
-        lsf_kernel = _crop_kernel(np.asarray(lsf_kernel), np.asarray(cube))
-        cube = _fft_convolve_3d(cube, jnp.asarray(lsf_kernel))
+        lsf_kernel = jnp.asarray(lsf_kernel)
+        lsf_kernel = _crop_kernel(lsf_kernel, cube)
+        cube = _fft_convolve_3d(cube, lsf_kernel)
 
     return cube
 
