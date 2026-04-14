@@ -26,7 +26,7 @@ from collections import OrderedDict
 import astropy.units as u
 
 
-_bayesian_fitting_methods = ['mcmc', 'nested']
+_bayesian_fitting_methods = ['mcmc', 'nested', 'jaxns']
 
 
 __all__ =  ['Fitter', 'FitResults',

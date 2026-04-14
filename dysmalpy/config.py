@@ -19,6 +19,11 @@ try:
 except ImportError:
     JAXAdamFitter = None
 
+try:
+    from dysmalpy.fitting import JAXNSFitter
+except ImportError:
+    JAXNSFitter = None
+
 # Third party import
 
 __all__ = [ "OutputOptions" ]
@@ -139,6 +144,8 @@ class OutputOptions:
             fit_type = 'nested'
         elif JAXAdamFitter is not None and isinstance(fitter, JAXAdamFitter):
             fit_type = 'jax_adam'
+        elif JAXNSFitter is not None and isinstance(fitter, JAXNSFitter):
+            fit_type = 'jaxns'
         else:
             raise ValueError("Unrecognized Fitter: {}!".format(type(fitter)))
 
@@ -203,6 +210,9 @@ class OutputOptions:
         elif fit_type == 'nested':
             self._set_nested_filenames()
 
+        elif fit_type == 'jaxns':
+            self._set_jaxns_filenames()
+
 
 
     def clear_filenames(self):
@@ -247,3 +257,11 @@ class OutputOptions:
         self.f_plot_run = self.outdir+self.file_base+'_nested_run.{}'.format(self.plot_type)
         self.f_plot_param_corner = self.outdir+self.file_base+'_nested_param_corner.{}'.format(self.plot_type)
         self.f_chain_ascii = self.outdir+self.file_base+'_nested_chain_blobs.dat'
+
+    def _set_jaxns_filenames(self):
+
+        self.f_sampler_results = self.outdir+self.file_base+'_jaxns_sampler_results.pickle'
+        self.f_plot_run = self.outdir+self.file_base+'_jaxns_run.{}'.format(self.plot_type)
+        self.f_plot_param_corner = self.outdir+self.file_base+'_jaxns_param_corner.{}'.format(self.plot_type)
+        self.f_plot_trace = self.outdir+self.file_base+'_jaxns_trace.{}'.format(self.plot_type)
+        self.f_chain_ascii = self.outdir+self.file_base+'_jaxns_chain_blobs.dat'

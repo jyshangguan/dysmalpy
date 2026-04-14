@@ -58,9 +58,9 @@ def dysmalpy_fit_single(param_filename=None, datadir=None, outdir=None,
 
     # ---------------------------------
     # Check some value validity:
-    if params['fit_method'] not in ['mcmc', 'mpfit', 'nested']:
+    if params['fit_method'] not in ['mcmc', 'mpfit', 'nested', 'jaxns']:
         raise ValueError(
-            '{} not accepted as a fitting method. Please only use "mcmc", "nested", or "mpfit"'.format(
+            '{} not accepted as a fitting method. Please only use "mcmc", "nested", "jaxns", or "mpfit"'.format(
                 params['fit_method']))
     # ---------------------------------
 

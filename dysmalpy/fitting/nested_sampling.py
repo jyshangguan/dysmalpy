@@ -12,10 +12,10 @@ from __future__ import (absolute_import, division, print_function,
 ## Standard library
 import logging
 try:
-    from multiprocess import cpu_count, Pool
+    from multiprocess import cpu_count, Pool, get_context
 except:
     # Old python versions:
-    from multiprocessing import cpu_count, Pool
+    from multiprocessing import cpu_count, Pool, get_context
 
 # DYSMALPY code
 from dysmalpy.data_io import load_pickle, dump_pickle, pickle_module
@@ -180,7 +180,7 @@ class NestedFitter(base.Fitter):
         # --------------------------------
         # Start pool
         if (self.nCPUs > 1):
-            pool = Pool(self.nCPUs)
+            pool = get_context('forkserver').Pool(self.nCPUs)
             queue_size = self.nCPUs
         else:
             pool = queue_size = None

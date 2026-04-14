@@ -2287,19 +2287,19 @@ def set_comp_param_prior(comp=None, param_name=None, params=None, param_name_ali
                 stddev = None
 
             if params['{}_prior'.format(param_name_alias)].lower() == 'flat':
-                comp.__getattribute__(param_name).prior = parameters.UniformPrior()
+                comp._get_param(param_name).prior = parameters.UniformPrior()
             elif params['{}_prior'.format(param_name_alias)].lower() == 'flat_linear':
-                comp.__getattribute__(param_name).prior = parameters.UniformLinearPrior()
+                comp._get_param(param_name).prior = parameters.UniformLinearPrior()
             elif params['{}_prior'.format(param_name_alias)].lower() == 'gaussian':
-                comp.__getattribute__(param_name).prior = parameters.BoundedGaussianPrior(center=center, stddev=stddev)
+                comp._get_param(param_name).prior = parameters.BoundedGaussianPrior(center=center, stddev=stddev)
             elif params['{}_prior'.format(param_name_alias)].lower() == 'sine_gaussian':
-                comp.__getattribute__(param_name).prior = parameters.BoundedSineGaussianPrior(center=center, stddev=stddev)
+                comp._get_param(param_name).prior = parameters.BoundedSineGaussianPrior(center=center, stddev=stddev)
             elif params['{}_prior'.format(param_name_alias)].lower() == 'gaussian_linear':
-                comp.__getattribute__(param_name).prior = parameters.BoundedGaussianLinearPrior(center=center, stddev=stddev)
+                comp._get_param(param_name).prior = parameters.BoundedGaussianLinearPrior(center=center, stddev=stddev)
             elif params['{}_prior'.format(param_name_alias)].lower() == 'tied_flat_lowtrunc':
-                comp.__getattribute__(param_name).prior = tied_functions.TiedUniformPriorLowerTrunc(compn='disk+bulge', paramn='total_mass')
+                comp._get_param(param_name).prior = tied_functions.TiedUniformPriorLowerTrunc(compn='disk+bulge', paramn='total_mass')
             elif params['{}_prior'.format(param_name_alias)].lower() == 'tied_gaussian_lowtrunc':
-                comp.__getattribute__(param_name).prior = tied_functions.TiedBoundedGaussianPriorLowerTrunc(center=center, stddev=stddev,
+                comp._get_param(param_name).prior = tied_functions.TiedBoundedGaussianPriorLowerTrunc(center=center, stddev=stddev,
                                                             compn='disk+bulge', paramn='total_mass')
             else:
                 print(" CAUTION: {}: {} prior is not currently supported. Defaulting to 'flat'".format(param_name,

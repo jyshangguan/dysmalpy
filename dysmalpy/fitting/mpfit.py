@@ -108,14 +108,18 @@ class MPFITFitter(base.Fitter):
                     parinfo[k]['value'] = p_initial[k]
                     parinfo[k]['parname'] = '{}:{}'.format(cmp, param_name)
 
-                    # If the class-level descriptor has a tied function
-                    # (set after add_component), mark as fixed in MPFIT
-                    # so it is not optimized independently but still
-                    # occupies its slot in the parameter vector.
-                    # Also clear limits to prevent bound-check failures
-                    # when the tied function computes values outside
-                    # the nominal bounds.
-                    param_desc = getattr(gal.model.components[cmp], param_name, None)
+                    # If the parameter has a tied function, mark as
+                    # fixed in MPFIT so it is not optimized
+                    # independently but still occupies its slot in the
+                    # parameter vector.  Also clear limits to prevent
+                    # bound-check failures when the tied function
+                    # computes values outside the nominal bounds.
+                    #
+                    # Use the instance-level _param_instances copy
+                    # (via _get_param) rather than the class-level
+                    # descriptor to avoid reading a stale value left
+                    # by an earlier test that polluted the class.
+                    param_desc = gal.model.components[cmp]._get_param(param_name)
                     if param_desc is not None and callable(getattr(param_desc, 'tied', None)):
                         parinfo[k]['fixed'] = 1
                         parinfo[k]['limited'] = [0, 0]

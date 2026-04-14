@@ -928,6 +928,25 @@ class ConditionalEmpiricalUniformPrior(Prior):
 
 
 
+def _propagate_to_instance(descriptor, attr_name, value):
+    """Propagate a constraint attribute from a class-level descriptor to
+    the owning model's instance-level ``_param_instances`` copy.
+
+    When ``model.param_name.tied = fn`` is executed, ``__get__`` returns
+    the *class-level* descriptor.  The property setter on the descriptor
+    calls this helper so that ``model._param_instances['param_name']``
+    (used by ModelSet to build its authoritative constraint dicts) stays
+    in sync.
+    """
+    model = getattr(descriptor, '_model', None)
+    name = getattr(descriptor, '_name', None)
+    if model is not None and name is not None:
+        if hasattr(model, '_param_instances') and name in model._param_instances:
+            inst_copy = model._param_instances[name]
+            if inst_copy is not descriptor:
+                object.__setattr__(inst_copy, attr_name, value)
+
+
 class DysmalParameter:
     """
     A lightweight, JAX-compatible replacement for
@@ -979,9 +998,16 @@ class DysmalParameter:
         self.unit = unit
         self.getter = getter
         self.setter = setter
-        self.fixed = fixed
-        self.tied = tied
-        self.prior = prior
+        object.__setattr__(self, '_fixed', fixed)
+        object.__setattr__(self, '_tied', tied)
+        object.__setattr__(self, '_prior', prior)
+
+        # Store original defaults so that _DysmalModel.__init__ can
+        # reset class-level pollution (plain attributes set on the
+        # class descriptor by earlier instances/tests).
+        self._original_fixed = fixed
+        self._original_tied = tied
+        self._original_prior = copy.deepcopy(prior)
 
         # Resolve bounds from the various ways they can be specified
         if bounds is not None:
@@ -1002,6 +1028,52 @@ class DysmalParameter:
         # bound to a model instance.
         self._model = None
         self._name = None          # attribute name on the owning class
+
+    # ------------------------------------------------------------------
+    # .tied / .fixed / .prior properties (propagate writes to instance copies)
+    # ------------------------------------------------------------------
+
+    @property
+    def tied(self):
+        """Tied-to-other-parameters function, or ``False``."""
+        return self._tied
+
+    @tied.setter
+    def tied(self, value):
+        object.__setattr__(self, '_tied', value)
+        _propagate_to_instance(self, '_tied', value)
+        # Also update the model's own tied dict
+        model = getattr(self, '_model', None)
+        name = getattr(self, '_name', None)
+        if model is not None and name is not None:
+            if hasattr(model, 'tied') and isinstance(model.tied, dict) and name in model.tied:
+                model.tied[name] = value
+
+    @property
+    def fixed(self):
+        """Whether the parameter is held fixed during fitting."""
+        return self._fixed
+
+    @fixed.setter
+    def fixed(self, value):
+        object.__setattr__(self, '_fixed', value)
+        _propagate_to_instance(self, '_fixed', value)
+        # Also update the model's own fixed dict
+        model = getattr(self, '_model', None)
+        name = getattr(self, '_name', None)
+        if model is not None and name is not None:
+            if hasattr(model, 'fixed') and isinstance(model.fixed, dict) and name in model.fixed:
+                model.fixed[name] = value
+
+    @property
+    def prior(self):
+        """Prior distribution for Bayesian fitting."""
+        return self._prior
+
+    @prior.setter
+    def prior(self, value):
+        object.__setattr__(self, '_prior', value)
+        _propagate_to_instance(self, '_prior', value)
 
     # ------------------------------------------------------------------
     # Descriptor protocol
@@ -1147,13 +1219,16 @@ class DysmalParameter:
             'unit': self.unit,
             'getter': self.getter,
             'setter': self.setter,
-            'fixed': self.fixed,
-            'tied': self.tied,
+            'fixed': self._fixed,
+            'tied': self._tied,
             'bounds': self.bounds,
-            'prior': self.prior,
+            'prior': self._prior,
             '_default': self._default,
             '_model': None,       # transient -- not pickled
             '_name': self._name,
+            '_original_fixed': getattr(self, '_original_fixed', self._fixed),
+            '_original_tied': getattr(self, '_original_tied', self._tied),
+            '_original_prior': getattr(self, '_original_prior', self._prior),
         }
 
     def __setstate__(self, state):
@@ -1162,13 +1237,16 @@ class DysmalParameter:
         self.unit = state['unit']
         self.getter = state['getter']
         self.setter = state['setter']
-        self.fixed = state['fixed']
-        self.tied = state['tied']
+        object.__setattr__(self, '_fixed', state['fixed'])
+        object.__setattr__(self, '_tied', state['tied'])
         self.bounds = state['bounds']
-        self.prior = state['prior']
+        object.__setattr__(self, '_prior', state['prior'])
         self._default = state['_default']
         self._model = None
         self._name = state['_name']
+        self._original_fixed = state.get('_original_fixed', state['fixed'])
+        self._original_tied = state.get('_original_tied', state['tied'])
+        self._original_prior = state.get('_original_prior', state['prior'])
 
     # ------------------------------------------------------------------
     # Rich comparison operators

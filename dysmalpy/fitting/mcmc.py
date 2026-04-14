@@ -14,10 +14,10 @@ from __future__ import (absolute_import, division, print_function,
 ## Standard library
 import logging
 try:
-    from multiprocess import cpu_count, Pool
+    from multiprocess import cpu_count, Pool, get_context
 except:
     # Old python versions:
-    from multiprocessing import cpu_count, Pool
+    from multiprocessing import cpu_count, Pool, get_context
 
 # DYSMALPY code
 from dysmalpy.data_io import load_pickle, dump_pickle
@@ -604,7 +604,7 @@ class MCMCFitter(base.Fitter):
         # --------------------------------
         # Start pool, moves, backend:
         if (self.nCPUs > 1):
-            pool = Pool(self.nCPUs)
+            pool = get_context('forkserver').Pool(self.nCPUs)
         else:
             pool = None
 
@@ -989,7 +989,8 @@ def initialize_walkers(model, nWalkers=None):
         for paramn in params_names:
             if (pfree_dict[compn][paramn] >= 0) :
                 # Free parameter: randomly sample from prior nWalker times:
-                param_rand = comp.__getattribute__(paramn).prior.sample_prior(comp.__getattribute__(paramn),
+                param = comp._get_param(paramn)
+                param_rand = param.prior.sample_prior(param,
                                     modelset=model, N=nWalkers)
                 stack_rand.append(param_rand)
     pos = np.array(list(zip(*stack_rand)))        # should have shape:   (nWalkers, nDim)

@@ -22,10 +22,11 @@ from .nested_sampling import NestedFitter, NestedResults, _reload_all_fitting_ne
 from .mpfit import MPFITFitter, MPFITResults, _reload_all_fitting_mpfit
 from .jax_loss import make_jax_loss_function, make_jax_log_prob_function
 from .jax_optimize import JAXAdamFitter, JAXAdamResults
+from .jaxns import JAXNSFitter, JAXNSResults, _reload_all_fitting_jaxns
 
 __all__ = ['MCMCFitter', 'NestedFitter', 'MPFITFitter',
-           'JAXAdamFitter',
-           'MCMCResults', 'NestedResults', 'MPFITResults', 'JAXAdamResults',
+           'JAXAdamFitter', 'JAXNSFitter',
+           'MCMCResults', 'NestedResults', 'MPFITResults', 'JAXAdamResults', 'JAXNSResults',
            'reload_all_fitting',
            'chisq_red', 'chisq_eval', 'chisq_red_per_type',
            'setup_oversampled_chisq',
@@ -62,7 +63,7 @@ def reload_all_fitting(filename_galmodel=None, filename_results=None, fit_method
     """
 
     if fit_method is None:
-        raise ValueError("Must set 'fit_method'! Options are 'mpfit', 'mcmc', or 'nested.")
+        raise ValueError("Must set 'fit_method'! Options are 'mpfit', 'mcmc', 'nested', or 'jaxns.")
 
     if fit_method.lower().strip() == 'mcmc':
         return _reload_all_fitting_mcmc(filename_galmodel=filename_galmodel, filename_results=filename_results)
@@ -70,6 +71,7 @@ def reload_all_fitting(filename_galmodel=None, filename_results=None, fit_method
         return _reload_all_fitting_nested(filename_galmodel=filename_galmodel, filename_results=filename_results)
     elif fit_method.lower().strip() == 'mpfit':
         return _reload_all_fitting_mpfit(filename_galmodel=filename_galmodel, filename_results=filename_results)
-    
+    elif fit_method.lower().strip() == 'jaxns':
+        return _reload_all_fitting_jaxns(filename_galmodel=filename_galmodel, filename_results=filename_results)
     else:
         raise ValueError("Fit type {} not recognized!".format(fit_method))

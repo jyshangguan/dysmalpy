@@ -149,7 +149,7 @@ class TestFittingWrappers:
         dict_bf_values = {'disk+bulge': {'total_mass': 10.7218,
                                          'r_eff_disk': 3.2576},
                           'halo': {'fdm': 0.2888},
-                          'dispprof_LINE': {'sigma0': 37.9097}}        
+                          'dispprof_LINE': {'sigma0': 37.9097}}
 
         # Check that best-fit values are the same
         check_bestfit_values(results, dict_bf_values, fit_method=params['fit_method'], ndim=1)

@@ -546,11 +546,19 @@ class ModelSet:
         """
         Update all tied parameters of the model
 
-        Scans every component's parameter descriptors directly for callable
-        ``.tied`` attributes, evaluates them with ``self`` (the ModelSet),
-        and writes the result back.  This works even when the tied function
-        was assigned *after* ``add_component`` (e.g. ``zh.sigmaz.tied = fn``),
-        because the descriptor object itself holds the reference.
+        Iterates over ``self.tied`` (the model's authoritative tied
+        configuration, populated at ``add_component`` time) and evaluates
+        any callable tied functions.  This ensures the same set of
+        parameters is considered tied here as in ``_get_free_parameters()``.
+
+        **Why not scan descriptors?**  The class-level ``DysmalParameter``
+        descriptor can have its ``.tied`` attribute modified *after* the
+        component is added to the model (e.g. ``zh.sigmaz.tied = fn``).
+        That change is visible via ``getattr(comp, pp)`` but is *not*
+        reflected in ``self.tied``.  If we used the descriptor path, a
+        parameter could be overwritten by a tied function even though
+        ``_get_free_parameters()`` treats it as free, causing ``-inf``
+        priors and 0 % acceptance in MCMC samplers.
 
         Performance: If no parameter values have changed since the last
         call, the entire evaluation is skipped.  This avoids redundant
@@ -573,13 +581,10 @@ class ModelSet:
         else:
             self._tied_cache_key = None
 
-        for cmp in self.components:
+        for cmp in self.tied:
             comp = self.components[cmp]
-            for pp in list(getattr(comp, 'param_names', [])):
-                param = getattr(comp, pp, None)
-                if param is None:
-                    continue
-                tied_fn = getattr(param, 'tied', False)
+            for pp in self.tied[cmp]:
+                tied_fn = self.tied[cmp][pp]
                 if callable(tied_fn):
                     try:
                         new_value = tied_fn(self)
@@ -682,7 +687,8 @@ class ModelSet:
             for paramn in params_names:
                 if pfree_dict[compn][paramn] >= 0:
                     # Free parameter: add to total prior
-                    log_prior_model += comp.__getattribute__(paramn).prior.log_prior(comp.__getattribute__(paramn), modelset=self)
+                    param = comp._get_param(paramn)
+                    log_prior_model += param.prior.log_prior(param, modelset=self)
         return log_prior_model
 
 
@@ -700,7 +706,7 @@ class ModelSet:
                 if pfree_dict[compn][paramn] >= 0:
                     # Free parameter: get unit prior transform
                     ind += 1
-                    v[ind] = comp.__getattribute__(paramn).prior.prior_unit_transform(comp.__getattribute__(paramn), u[ind], modelset=self)
+                    v[ind] = comp._get_param(paramn).prior.prior_unit_transform(comp._get_param(paramn), u[ind], modelset=self)
                                 
         return v
 

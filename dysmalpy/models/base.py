@@ -283,6 +283,12 @@ class _DysmalModel(metaclass=_DysmalModelMeta):
         for pname, param in self._params.items():
             p = copy.deepcopy(param)
             p._model = self
+            # Reset class-level pollution: earlier instances/tests may have
+            # set .tied/.fixed/.prior on the class descriptor via instance
+            # access, which deepcopy faithfully copies.  Restore originals.
+            object.__setattr__(p, '_tied', p._original_tied)
+            object.__setattr__(p, '_fixed', p._original_fixed)
+            object.__setattr__(p, '_prior', copy.deepcopy(p._original_prior))
             self._param_instances[pname] = p
 
         # Ordered tuple of parameter names
@@ -340,6 +346,26 @@ class _DysmalModel(metaclass=_DysmalModelMeta):
         raise AttributeError(
             "'{0}' has no attribute '{1}'".format(type(self).__name__, name)
         )
+
+    def _get_param(self, name):
+        """Return the per-instance :class:`DysmalParameter` copy.
+
+        Unlike ``comp.name`` (which returns the class-level descriptor via
+        the descriptor protocol), this method returns the deep-copied
+        descriptor stored in ``_param_instances``.  The copy carries the
+        instance-specific ``bounds``, ``prior``, ``tied``, and ``fixed``
+        constraints that were set during model construction.
+
+        Code that needs to read ``.bounds``, ``.prior``, etc. on a
+        component parameter should use this method instead of
+        ``getattr(comp, name)`` or ``comp.__getattribute__(name)``.
+        """
+        params = self.__dict__.get('_param_instances', {})
+        if name not in params:
+            raise AttributeError(
+                "'{0}' has no parameter '{1}'".format(type(self).__name__, name)
+            )
+        return params[name]
 
     def __setattr__(self, name, value):
         # Always allow internal attributes through
