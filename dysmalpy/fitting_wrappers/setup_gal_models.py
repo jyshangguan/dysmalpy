@@ -344,6 +344,9 @@ def setup_fitter(params=None):
     elif params['fit_method'].strip().lower() == 'mpfit':
         fitter = _setup_mpfit_fitter(params=params)
 
+    elif params['fit_method'].strip().lower() == 'jaxns':
+        fitter = _setup_jaxns_fitter(params=params)
+
     return fitter
 
 
@@ -479,6 +482,63 @@ def _setup_mpfit_fitter(params=None):
 
     return fitter
 
+
+def _setup_jaxns_fitter(params=None):
+    """Setup JAXNS nested sampling fitter from param file settings."""
+
+    dict_fitter_settings = {}
+
+    for key in ['blob_name', 'nPostBins', 'oversampled_chisq',
+                'num_live_points', 'dlogZ',
+                'max_num_likelihood_evaluations',
+                'max_samples', 's', 'k', 'c',
+                'difficult_model', 'parameter_estimation',
+                'shell_fraction', 'gradient_guided',
+                'init_efficiency_threshold', 'verbose']:
+        if key in params.keys():
+            dict_fitter_settings[key] = params[key]
+
+    if 'linked_posteriors' in params.keys():
+        if params['linked_posteriors'] is not None:
+            linked_post_arr = []
+            for lpost in params['linked_posteriors']:
+                if lpost.strip().lower() == 'total_mass':
+                    linked_post_arr.append(['disk+bulge', 'total_mass'])
+                elif lpost.strip().lower() == 'mvirial':
+                    linked_post_arr.append(['halo', 'mvirial'])
+                elif lpost.strip().lower() == 'fdm':
+                    linked_post_arr.append(['halo', 'fdm'])
+                elif lpost.strip().lower() == 'alpha':
+                    linked_post_arr.append(['halo', 'alpha'])
+                elif lpost.strip().lower() == 'rb':
+                    linked_post_arr.append(['halo', 'rB'])
+                elif lpost.strip().lower() == 'r_eff_disk':
+                    linked_post_arr.append(['disk+bulge', 'r_eff_disk'])
+                elif lpost.strip().lower() == 'bt':
+                    linked_post_arr.append(['disk+bulge', 'bt'])
+                elif lpost.strip().lower() == 'sigma0':
+                    linked_post_arr.append(['dispprof_LINE', 'sigma0'])
+                elif lpost.strip().lower() == 'inc':
+                    linked_post_arr.append(['geom', 'inc'])
+                elif lpost.strip().lower() == 'pa':
+                    linked_post_arr.append(['geom', 'pa'])
+                elif lpost.strip().lower() == 'xshift':
+                    linked_post_arr.append(['geom', 'xshift'])
+                elif lpost.strip().lower() == 'yshift':
+                    linked_post_arr.append(['geom', 'yshift'])
+                elif lpost.strip().lower() == 'vel_shift':
+                    linked_post_arr.append(['geom', 'vel_shift'])
+                else:
+                    raise ValueError("linked posterior for {} not currently implemented!".format(lpost))
+
+            linked_posterior_names = [linked_post_arr]
+            dict_fitter_settings['linked_posterior_names'] = linked_posterior_names
+
+    fitter = fitting.JAXNSFitter()
+    for key in dict_fitter_settings.keys():
+        fitter.__dict__[key] = dict_fitter_settings[key]
+
+    return fitter
 
 
 # ------------------------------------------------------------
