@@ -3,17 +3,10 @@
 
 This script demonstrates JAXNS nested sampling fitting of 2D kinematic maps for
 GS4_43501 using DYSMALPY's JAXNS-based sampler.  It produces a best-fit plot,
-corner plot, diagnostics, evidence estimate, and a results report.
+corner plot, run diagnostics, evidence estimate, and a results report.
 
-The model has 8 free parameters (total_mass, r_eff_disk, fdm, sigma0,
+The model has 10 free parameters (total_mass, r_eff_disk, fdm, sigma0,
 sigmaz, inc, pa, xshift, yshift, vel_shift — minus tied/fixed).
-
-**Performance note:** The current DYSMALPY model evaluation is not fully
-JAX-traceable, so JAXNS falls back to ``jax.pure_callback`` for each
-likelihood evaluation.  This demo uses settings that achieve a reduced
-chi-squared of ~9 (comparable to MPFIT's ~10) but requires ~40 minutes of
-wall-clock time.  For production fitting, use the NestedFitter (dynesty with
-forkserver) or MPFITFitter.
 
 Usage:
     JAX_PLATFORMS=cpu python demo/demo_2D_fitting_JAXNS.py
@@ -45,14 +38,12 @@ local_param = os.path.join(outdir, 'fitting_2D_jaxns_demo.params')
 # JAXNS-specific overrides (key, value) to append after reading the MPFIT file.
 # The read_fitting_params parser simply takes the last value for each key.
 #
-# num_live_points=150, dlogZ=0.1, max_evals=15000 give good convergence
-# (reduced chi-squared ~9) in ~40 minutes on CPU with pure_callback fallback.
+# num_live_points=150, dlogZ=0.1 give good convergence (reduced chi-squared ~9).
 JAXNS_OVERRIDES = """
 # ----- JAXNS overrides (appended to MPFIT template) -----
 fit_method,      jaxns
 num_live_points, 150
 dlogZ,            0.1
-max_num_likelihood_evaluations, 15000
 oversampled_chisq, True
 verbose,          True
 
@@ -85,9 +76,6 @@ print("=" * 60)
 print(f"  Data directory : {datadir}")
 print(f"  Param file     : {param_filename}")
 print(f"  Output directory: {outdir}")
-print()
-print("  NOTE: JAXNS uses pure_callback fallback (model not JAX-traceable).")
-print("        Expect ~40 min wall-clock on CPU for this demo.")
 print("=" * 60)
 
 # ---------------------------------------------------------------------------
@@ -172,15 +160,29 @@ print("=" * 60)
 print(f"  Reduced chi-squared : {results.bestfit_redchisq:.4f}")
 print(f"  Wall-clock time      : {elapsed:.2f} s ({elapsed/60:.1f} min)")
 
-# 3e. Regenerate diagnostic plots (JAXNS generates its own corner + run plots
-#     during the fit; we regenerate the best-fit comparison plot here)
-try:
-    bestfit_png = os.path.join(outdir, f'{galID}_{fit_method}_bestfit_demo.png')
+# 3e. Regenerate diagnostic plots (best-fit comparison, corner, run diagnostics)
+bestfit_png = os.path.join(outdir, f'{galID}_{fit_method}_bestfit_demo.png')
+corner_png = os.path.join(outdir, f'{galID}_{fit_method}_param_corner_demo.png')
+run_png = os.path.join(outdir, f'{galID}_{fit_method}_run_demo.png')
 
-    print(f"\n>>> Generating best-fit plot: {bestfit_png}")
-    results.plot_results(gal, f_plot_bestfit=bestfit_png, overwrite=True)
+try:
+    print(f"\n>>> Generating diagnostic plots...")
+    print(f"    Best-fit    : {bestfit_png}")
+    print(f"    Corner plot : {corner_png}")
+    print(f"    Run diag.   : {run_png}")
+
+    results.plot_results(
+        gal,
+        f_plot_bestfit=bestfit_png,
+        f_plot_param_corner=corner_png,
+        f_plot_run=run_png,
+        overwrite=True,
+        only_if_fname_set=True,
+    )
 except Exception as e:
-    print(f"  Plot generation skipped: {e}")
+    print(f"  Plot generation failed: {e}")
+    import traceback
+    traceback.print_exc()
 
 # 3f. Print posterior samples summary
 if hasattr(results, 'sampler') and results.sampler is not None:

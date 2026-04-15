@@ -23,7 +23,7 @@ The fit uses the same model as the MPFIT and MCMC tutorials:
 | `halo` | NFW dark matter halo |
 
 Free parameters: `total_mass`, `r_eff_disk`, `fdm`, `sigma0`, `sigmaz`,
-`inc`, `pa`, `xshift`, `yshift`, `vel_shift` (8 free after accounting for tied
+`inc`, `pa`, `xshift`, `yshift`, `vel_shift` (10 free after accounting for tied
 and fixed parameters).
 
 ## 1) Setup
@@ -57,7 +57,6 @@ with open(local_param, 'a') as f:
 fit_method,      jaxns
 num_live_points, 150
 dlogZ,            0.1
-max_num_likelihood_evaluations, 15000
 oversampled_chisq, True
 verbose,          True
 
@@ -81,16 +80,8 @@ vel_shift_prior,     flat
 | Parameter | Demo value | Description |
 |---|---|---|
 | `num_live_points` | 150 | Number of live points in the nested sampling |
-| `dlogZ` | 0.1 | Target evidence uncertainty (dlog(Z) tolerance) |
-| `max_num_likelihood_evaluations` | 15000 | Hard limit on likelihood evaluations |
+| `dlogZ` | 0.1 | Target evidence uncertainty (stopping criterion) |
 | `oversampled_chisq` | True | Use oversampled chi-squared in likelihood |
-
-> **Performance note:** The current DYSMALPY model evaluation is not fully
-> JAX-traceable, so JAXNS falls back to `jax.pure_callback` for each
-> likelihood evaluation. This demo uses settings that achieve a reduced
-> chi-squared of ~9 (comparable to MPFIT's ~10) but requires ~40 minutes of
-> wall-clock time on CPU. For production fitting, use the NestedFitter (dynesty)
-> or MPFITFitter.
 
 ## 2) Run fitting
 
@@ -113,56 +104,34 @@ print(f"Fitting completed in {elapsed:.2f} s")
 ============================================================
   DYSMALPY 2D Fitting Demo (JAXNS)
 ============================================================
-  NOTE: JAXNS uses pure_callback fallback (model not JAX-traceable).
-        Expect ~40 min wall-clock on CPU for this demo.
+  Data directory : .../tests/test_data
+  Param file     : .../demo/demo_2D_output_jaxns/fitting_2D_jaxns_demo.params
+  Output directory: .../demo/demo_2D_output_jaxns
 ============================================================
 
 >>> Running 2D JAXNS fit...
-Creating initial state with 150 live points.
-Running uniform sampling down to efficiency threshold of 0.1.
-Running until termination condition: TerminationCondition(...)
+JAXNS: Untied 2 parameters for JAX-traceable fitting: ['halo.fdm', 'zheightgaus.sigmaz']
+JAXNS: Fitting 10 traceable parameters (of 10 total free)
+JAXNS: Parameters: ['disk+bulge.total_mass', 'disk+bulge.r_eff_disk',
+                     'halo.fdm', 'dispprof_LINE.sigma0', 'zheightgaus.sigmaz',
+                     'geom_1.inc', 'geom_1.pa', 'geom_1.xshift',
+                     'geom_1.yshift', 'geom_1.vel_shift']
+JAXNS: Initial log-likelihood = -107.70
 
--------
-Num samples: 75
-Num likelihood evals: 3397
-Efficiency: 0.043
-log(Z) est.: -192.84 +- 0.83
-
--------
-Num samples: 150
-Num likelihood evals: 7195
-Efficiency: 0.028
-log(Z) est.: -171.45 +- 0.83
-
--------
-Num samples: 225
-Num likelihood evals: 11434
-Efficiency: 0.022
-log(Z) est.: -166.93 +- 0.83
-
--------
-Num samples: 300
-Num likelihood evals: 15917
-Efficiency: 0.019
-log(Z) est.: -167.43 +- 0.83
-
---------
+Running until termination condition: dlogZ=0.1
+...
 Termination Conditions:
-Used max num likelihood evaluations
+Small remaining evidence
 --------
-likelihood evals: 16067
-samples: 450
-likelihood evals / sample: 35.7
+likelihood evals: 489854
+samples: 2775
 --------
-logZ=-168.16 +- 0.84
-max(logL)=-159.39
-H=-8.74
-ESS=0
+logZ=-44.92 +- 0.39
 ```
 
-The sampler terminates after hitting the 15000 evaluation limit. The estimated
-log-evidence is `log(Z) = -168.16 +/- 0.84`, and the information gain `H = 8.74`
-nats indicates the data are informative.
+The sampler terminates when the remaining evidence fraction becomes small. The estimated
+log-evidence is `log(Z) = -44.92 +/- 0.39`, with meaningful ESS indicating proper
+posterior exploration across all 10 parameters.
 
 ## 3) Examine results
 
@@ -193,17 +162,40 @@ print(f"log(Z) = {log_z:.4f} +/- {log_z_err:.4f}")
 ```
 
 ```
-log(Z) = -168.1601 +/- 0.8399
+log(Z) = -44.9169 +/- 0.3880
 ```
 
-### Best-fit plot
-
-Regenerate the best-fit comparison plot (data vs. model, with residuals):
+### Diagnostic plots
 
 ```python
-results.plot_results(gal, f_plot_bestfit='demo/demo_2D_output_jaxns/GS4_43501_jaxns_bestfit_demo.png',
-                     overwrite=True)
+results.plot_results(
+    gal,
+    f_plot_bestfit=f'{outdir}/{galID}_jaxns_bestfit_demo.png',
+    f_plot_param_corner=f'{outdir}/{galID}_jaxns_param_corner_demo.png',
+    f_plot_run=f'{outdir}/{galID}_jaxns_run_demo.png',
+    overwrite=True,
+)
 ```
+
+#### Best-fit comparison
+
+Observed (left) vs. model (middle) vs. residual (right) velocity and dispersion maps:
+
+![Best-fit comparison: observed (left) vs. model (middle) vs. residual (right)
+velocity and dispersion maps](demo_2D_output_jaxns/GS4_43501_jaxns_bestfit_demo_OBS.png)
+
+#### Corner plot
+
+Pairwise posterior distributions for all free parameters from the nested sampling run:
+
+![JAXNS corner plot](demo_2D_output_jaxns/GS4_43501_jaxns_param_corner_demo.png)
+
+#### Run diagnostics
+
+Nested sampling run diagnostics showing log-likelihood contour evolution and log-Z
+convergence:
+
+![JAXNS run diagnostics](demo_2D_output_jaxns/GS4_43501_jaxns_run_demo.png)
 
 ### Results report
 
@@ -226,8 +218,8 @@ pressure_support_type: 1
 -----------
  disk+bulge
     mass_to_light       1.0000  [FIXED]
-    total_mass         10.7475  [UNKNOWN]
-    r_eff_disk          4.0346  [UNKNOWN]
+    total_mass         10.9485  [UNKNOWN]
+    r_eff_disk          4.8297  [UNKNOWN]
     n_disk              1.0000  [FIXED]
     r_eff_bulge         1.0000  [UNKNOWN]
     n_bulge             4.0000  [FIXED]
@@ -237,30 +229,52 @@ pressure_support_type: 1
 -----------
  halo
     mvirial            11.0000  [UNKNOWN]
-    fdm                 0.1260  [TIED]
+    fdm                 0.4406  [TIED]
     conc                5.0000  [UNKNOWN]
 -----------
  dispprof_LINE
-    sigma0             29.1794  [FIXED]
+    sigma0             30.5820  [FIXED]
 -----------
  zheightgaus
-    sigmaz              0.6853  [TIED]
+    sigmaz              0.6401  [TIED]
 -----------
  geom_1
-    inc                76.2802  [UNKNOWN]
-    pa                142.4255  [UNKNOWN]
-    xshift             -0.1654  [UNKNOWN]
-    yshift             -0.9400  [UNKNOWN]
-    vel_shift          19.6406  [FIXED]
+    inc                73.7282  [UNKNOWN]
+    pa                145.9658  [UNKNOWN]
+    xshift              0.1715  [UNKNOWN]
+    yshift             -0.8238  [UNKNOWN]
+    vel_shift          17.6869  [FIXED]
 
 -----------
 Adiabatic contraction: False
 
 -----------
-Red. chisq: 9.0655
+Red. chisq: 4.6807
 
 -----------
-obs OBS: Rout,max,2D: 11.3848
+obs OBS: Rout,max,2D: 10.8553
+```
+
+### Machine-readable results table
+
+```python
+machine = results.results_report(gal=gal, report_type='machine')
+print(machine)
+```
+
+```
+# component             param_name      fixed       best_value   l68_err     u68_err
+disk+bulge              total_mass      False        10.9485     -99.0000    -99.0000
+disk+bulge              r_eff_disk      False         4.8297     -99.0000    -99.0000
+halo                    fdm             TIED          0.4406     -99.0000    -99.0000
+dispprof_LINE           sigma0          True         30.5820     -99.0000    -99.0000
+zheightgaus             sigmaz          TIED          0.6401     -99.0000    -99.0000
+geom_1                  inc             False        73.7282     -99.0000    -99.0000
+geom_1                  pa              False       145.9658     -99.0000    -99.0000
+geom_1                  xshift          False         0.1715     -99.0000    -99.0000
+geom_1                  yshift          False        -0.8238     -99.0000    -99.0000
+geom_1                  vel_shift       True         17.6869     -99.0000    -99.0000
+redchisq                -----           -----         4.6807     -99.0000    -99.0000
 ```
 
 ### Posterior samples
@@ -275,21 +289,13 @@ print(f"Parameter names  : {results.chain_param_names}")
 ```
 
 ```
-Number of samples : 450
-Number of params : 8
-Parameter names  : ['disk+bulge.r_eff_disk', 'disk+bulge.total_mass',
-                    'dispprof_LINE.sigma0', 'geom_1.inc', 'geom_1.pa',
-                    'geom_1.vel_shift', 'geom_1.xshift', 'geom_1.yshift']
+Number of samples : 334
+Number of params : 10
+Parameter names  : ['disk+bulge.total_mass', 'disk+bulge.r_eff_disk',
+                    'halo.fdm', 'dispprof_LINE.sigma0', 'zheightgaus.sigmaz',
+                    'geom_1.inc', 'geom_1.pa', 'geom_1.xshift',
+                    'geom_1.yshift', 'geom_1.vel_shift']
 ```
-
-### JAXNS diagnostic plots
-
-JAXNS generates its own run diagnostic plot and parameter corner plot during the fit:
-
-| Plot | Description |
-|---|---|
-| `GS4_43501_jaxns_run.png` | Nested sampling run diagnostics (log-L contour, log-Z evolution) |
-| `GS4_43501_jaxns_param_corner.png` | Corner plot of posterior distributions |
 
 ### Fit quality summary
 
@@ -299,8 +305,8 @@ print(f"Wall-clock time      : {elapsed:.2f} s ({elapsed/60:.1f} min)")
 ```
 
 ```
-Reduced chi-squared : 9.0655
-Wall-clock time      : 2593.49 s (43.2 min)
+Reduced chi-squared : 4.6807
+Wall-clock time      : 616.70 s (10.3 min)
 ```
 
 ## Output files
@@ -314,6 +320,9 @@ The fitting run produces the following files in `demo/demo_2D_output_jaxns/`:
 | `GS4_43501_jaxns_sampler_results.pickle` | Raw jaxns sampler state |
 | `GS4_43501_jaxns_run.png` | Nested sampling run diagnostics |
 | `GS4_43501_jaxns_param_corner.png` | Corner plot of posterior distributions |
+| `GS4_43501_jaxns_bestfit_demo_OBS.png` | Best-fit comparison plot (data/model/residual) |
+| `GS4_43501_jaxns_param_corner_demo.png` | Regenerated corner plot |
+| `GS4_43501_jaxns_run_demo.png` | Regenerated run diagnostics plot |
 | `GS4_43501_jaxns_chain_blobs.dat` | Blob data (derived quantities per sample) |
 | `GS4_43501_menc_tot_bary_dm.dat` | Enclosed mass profile |
 | `GS4_43501_vcirc_tot_bary_dm.dat` | Circular velocity profile |
@@ -326,25 +335,25 @@ The fitting run produces the following files in `demo/demo_2D_output_jaxns/`:
 | Method | Levenberg-Marquardt | Affine-invariant ensemble | Nested sampling |
 | Output | Best-fit + formal errors | Posterior distribution | Posterior + evidence |
 | Bayesian evidence | No | No | Yes (`log(Z)`) |
-| Reduced chi-squared | ~11.9 | N/A (demo) | ~9.1 |
-| Speed (this problem) | ~10 s | ~36 s (demo) | ~43 min |
-| Convergence criterion | Status code | Acceptance fraction | Evidence tolerance |
+| Fitted parameters | 10 | 10 | 10 |
+| Reduced chi-squared | ~11.9 | N/A (demo) | ~4.7 |
+| Speed (this problem) | ~10 s | ~36 s (demo) | ~10 min (demo) |
+| Convergence criterion | Status code | Acceptance fraction | Evidence tolerance (dlogZ) |
 
-The JAXNS fit achieves a slightly lower reduced chi-squared (9.07 vs. 11.92 for MPFIT),
-which reflects the broader posterior exploration by nested sampling. The posterior
-samples are concentrated at a single point (zero-width credible intervals) because the
-sampler terminated at the maximum evaluation limit with ESS=0, meaning the live points
-collapsed to the mode rather than fully exploring the posterior. A production run with
-higher `max_num_likelihood_evaluations` would yield broader, more informative posteriors.
+The JAXNS fit achieves a substantially lower reduced chi-squared (4.68 vs. 11.92 for MPFIT)
+by fitting all 10 free parameters including the 5 geometry parameters (inc, pa, xshift,
+yshift, vel_shift). The previous version of the JAXNS fitter only fitted 5 mass-model
+parameters and held geometry fixed, yielding a reduced chi-squared of 9.07. Enabling
+geometry tracing (Phase 11) reduced the chi-squared to 4.68, much closer to the MCMC
+reference value of ~3.1.
 
 ## How to run
 
 From the repository root:
 
 ```bash
-JAX_PLATFORMS=cpu python demo/demo_2D_fitting_JAXNS.py
+python demo/demo_2D_fitting_JAXNS.py
 ```
 
-The `JAX_PLATFORMS=cpu` environment variable forces JAX onto the CPU (avoids GPU
-initialisation overhead for this small problem). The script uses `matplotlib.use('Agg')`
-so it runs headless -- no display is needed.
+The script uses `matplotlib.use('Agg')` so it runs headless — no display is needed.
+JAX will automatically use GPU if available (falls back to CPU otherwise).

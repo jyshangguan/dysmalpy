@@ -8,19 +8,9 @@
 # JAXNS uses JAX-native parallelism instead of Python multiprocessing,
 # so it avoids the fork-deadlock issues that can arise with JAX + multiprocessing.
 #
-# **Current Status (dev_jax branch):**
-# JAXNS requires a fully JAX-traceable log-likelihood function.  The current
-# DYSMALPY model evaluation path (``gal.create_model_data()`` -> numpy) is
-# not yet JAX-traceable, so JAXNS will be extremely slow (it falls back to
-# ``jax.pure_callback`` or ``jax.disable_jit`` for each likelihood call).
-#
-# This module provides the infrastructure so that once the model evaluation
-# becomes fully JAX-traceable (a goal of the dev_jax branch), JAXNS can be
-# used as a drop-in replacement for dynesty with significant speedups from
-# JAX-native parallelism.
-#
-# For now, users should use the dynesty NestedFitter (with forkserver) or
-# MPFITFitter for actual fitting work.
+# The log-likelihood is fully JAX-traceable (simulate_cube -> rebin ->
+# convolve -> crop -> chi-squared), so JAXNS runs with full JIT compilation
+# on both CPU and GPU.
 
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
@@ -70,11 +60,23 @@ except Exception as e:
     logger.warning("JAX/TFP not found (needed for JAXNS): %s", _jaxns_import_error)
 
 
-def _build_jaxns_prior_model(gal):
+def _build_jaxns_prior_model(gal, traceable_param_info=None):
     """Build a jaxns prior_model generator from dysmalpy galaxy priors.
 
     Iterates over free parameters in order and yields jaxns Prior objects
     with TFP distributions matching the dysmalpy prior types.
+
+    When *traceable_param_info* is provided, only those parameters
+    are included.  Otherwise all free parameters are used
+    (backwards compatible).
+
+    Parameters
+    ----------
+    gal : Galaxy
+    traceable_param_info : dict or None
+        If provided, must contain ``'reindexed'`` — a list of
+        ``((cmp_name, param_name), theta_idx)`` tuples. Only these
+        parameters will get priors.
 
     Returns
     -------
@@ -86,12 +88,23 @@ def _build_jaxns_prior_model(gal):
     pfree_dict = gal.model.get_free_parameter_keys()
     param_names = []
 
+    # Determine which parameters to include
+    if traceable_param_info is not None:
+        reindexed = traceable_param_info['reindexed']
+        # Build a set of (comp, param) pairs that are traceable
+        traceable_set = {(cmp, param) for (cmp, param), _ in reindexed}
+    else:
+        traceable_set = None
+
     # Store prior info for each param
     _prior_info = []
     for compn in pfree_dict:
         comp = gal.model.components[compn]
         for paramn in pfree_dict[compn]:
             if pfree_dict[compn][paramn] >= 0:
+                # Skip non-traceable params if filtering is requested
+                if traceable_set is not None and (compn, paramn) not in traceable_set:
+                    continue
                 param = comp._get_param(paramn)
                 prior = param.prior
                 bounds = param.bounds
@@ -138,67 +151,126 @@ def _build_jaxns_prior_model(gal):
     return prior_model, param_names
 
 
-def _make_log_likelihood(gal, fitter):
-    """Create a log-likelihood function for jaxns.
+def _untie_parameters_for_jax(gal):
+    """Convert tied parameters to free parameters for JAX-traceable fitting.
 
-    Since dysmalpy's model evaluation uses numpy/Python (not JAX-traceable),
-    we wrap the computation with ``jax.pure_callback`` so that jaxns can
-    JIT-compile the sampler while calling our numpy likelihood as a
-    side-effect.
+    Tied parameter functions (e.g. mvirial from fdm via brentq, sigmaz from
+    r_eff_disk) use scipy/numpy operations that are not JAX-traceable.
+    This function evaluates each tied function once to get the initial value,
+    then marks the parameter as free (no longer tied).
 
     Parameters
     ----------
     gal : Galaxy
-        Galaxy instance with model and data.
-    fitter : JAXNSFitter
-        Fitter instance with settings.
 
     Returns
     -------
-    log_likelihood : callable
-        JAX-compatible function that takes parameter values (as positional
-        args) and returns a scalar log-likelihood.
+    untied_info : list of dict
+        Each entry records what was untied, for later restoration.
     """
-    # Capture the galaxy and fitter in the closure
-    _gal = gal
-    _fitter = fitter
+    untied_info = []
+    model = gal.model
 
-    # Build ordered list of parameter names
-    _param_names_ordered = []
-    pfree_dict = gal.model.get_free_parameter_keys()
-    for compn in pfree_dict:
-        for paramn in pfree_dict[compn]:
-            if pfree_dict[compn][paramn] >= 0:
-                _param_names_ordered.append(f"{compn}.{paramn}")
+    # Update tied functions first so current values are computed
+    model._update_tied_parameters()
 
-    ndim = len(_param_names_ordered)
+    for cmp_name in list(model.tied.keys()):
+        comp = model.components[cmp_name]
+        for param_name in list(model.tied[cmp_name].keys()):
+            tied_fn = model.tied[cmp_name][param_name]
+            if not callable(tied_fn):
+                continue
 
-    def _numpy_log_likelihood(theta_flat):
-        """Pure numpy log-likelihood computation."""
-        theta_np = np.asarray(theta_flat).flatten()
-        _gal.model.update_parameters(theta_np)
-        _gal.create_model_data()
-        llike = base.log_like(_gal, fitter=_fitter)
-        # log_like returns (llike, blobvals) when blob_name is set;
-        # jaxns expects a scalar log-likelihood only.
-        if isinstance(llike, tuple):
-            return np.float64(llike[0])
-        return np.float64(llike)
+            # Record the original state
+            orig_tied = model.tied[cmp_name][param_name]
+            orig_fixed = model.fixed[cmp_name].get(param_name, False)
+            param_inst = comp._param_instances[param_name]
+            orig_descriptor_tied = param_inst.tied
 
-    def log_likelihood(*theta_tuple):
-        # theta_tuple contains one JAX array per parameter
-        theta_flat = jnp.concatenate([jnp.atleast_1d(v) for v in theta_tuple])
+            # Evaluate the tied function to get current value
+            try:
+                current_value = float(tied_fn(model))
+            except Exception as e:
+                logger.warning("Could not evaluate tied function for "
+                               "%s.%s: %s — skipping", cmp_name, param_name, e)
+                continue
 
-        # Use pure_callback to call numpy code from within JIT
-        result_shape = jax.ShapeDtypeStruct((), jnp.float64)
-        llike = jax.pure_callback(
-            _numpy_log_likelihood,
-            result_shape,
-            theta_flat
-        )
-        return llike
+            # Set the parameter value explicitly
+            model.set_parameter_value(cmp_name, param_name, current_value,
+                                      skip_updated_tied=True)
 
-    return log_likelihood
+            # Mark as no longer tied
+            model.tied[cmp_name][param_name] = False
+            model.fixed[cmp_name][param_name] = False
+            param_inst.tied = False
+            param_inst.fixed = False
+
+            # Set a flat prior if the current prior is None or a tied-function prior.
+            # UniformPrior() takes no arguments; it uses the parameter's bounds.
+            if param_inst.prior is None:
+                from dysmalpy.parameters import UniformPrior
+                param_inst.prior = UniformPrior()
+
+            untied_info.append({
+                'comp': cmp_name,
+                'param': param_name,
+                'orig_tied': orig_tied,
+                'orig_fixed': orig_fixed,
+                'orig_descriptor_tied': orig_descriptor_tied,
+                'init_value': current_value,
+            })
+
+    # Recount free parameters
+    model.nparams_free = sum(
+        1 for c in model.components
+        for p in model.fixed[c]
+        if not model.fixed[c][p] and not model.tied[c][p]
+    )
+
+    if untied_info:
+        logger.info("JAXNS: Untied %d parameters for JAX-traceable fitting: %s",
+                     len(untied_info),
+                     [f"{u['comp']}.{u['param']}" for u in untied_info])
+
+    return untied_info
+
+
+def _retie_parameters(untied_info, gal):
+    """Restore tied parameter status after JAXNS fitting.
+
+    Parameters
+    ----------
+    untied_info : list of dict
+        Output from ``_untie_parameters_for_jax``.
+    gal : Galaxy
+    """
+    model = gal.model
+
+    for info in untied_info:
+        cmp_name = info['comp']
+        param_name = info['param']
+        comp = model.components[cmp_name]
+        param_inst = comp._param_instances[param_name]
+
+        # Restore tied status
+        model.tied[cmp_name][param_name] = info['orig_tied']
+        model.fixed[cmp_name][param_name] = info['orig_fixed']
+        param_inst.tied = info['orig_descriptor_tied']
+
+        # Restore fixed status
+        if info['orig_fixed']:
+            param_inst.fixed = True
+
+    # Recount free parameters
+    model.nparams_free = sum(
+        1 for c in model.components
+        for p in model.fixed[c]
+        if not model.fixed[c][p] and not model.tied[c][p]
+    )
+
+    if untied_info:
+        logger.info("JAXNS: Restored tied status for %d parameters",
+                     len(untied_info))
 
 
 class JAXNSFitter(base.Fitter):
@@ -209,15 +281,19 @@ class JAXNSFitter(base.Fitter):
     avoids fork-deadlock issues that can arise with JAX + multiprocessing
     (as experienced with dynesty/emcee on the dev_jax branch).
 
+    The log-likelihood is fully JAX-traceable: theta -> simulate_cube ->
+    rebin -> convolve -> crop -> chi-squared.  This enables full JIT
+    compilation and GPU acceleration.
+
     Notes
     -----
     Requires ``jaxns`` and ``tensorflow-probability`` to be installed.
 
-    **Performance warning:** The current DYSMALPY model evaluation is not
-    fully JAX-traceable, so JAXNS falls back to ``jax.pure_callback`` for
-    each likelihood evaluation. This is much slower than using dynesty with
-    forkserver. Use the ``NestedFitter`` for production fitting and reserve
-    ``JAXNSFitter`` for testing or when the model becomes JAX-traceable.
+    Tied parameters (e.g. mvirial computed from fdm, sigmaz from r_eff_disk)
+    are automatically converted to free parameters before fitting, since the
+    tied functions use scipy/numpy operations that are not JAX-traceable.
+    Their prior is set from the parameter bounds. After fitting, the original
+    tied status is restored.
     """
 
     def __init__(self, **kwargs):
@@ -295,6 +371,9 @@ class JAXNSFitter(base.Fitter):
             for pname, pinst in getattr(comp, '_param_instances', {}).items():
                 object.__setattr__(pinst, '_model', comp)
 
+        # Convert tied parameters to free for JAX-traceable fitting
+        untied_info = _untie_parameters_for_jax(gal)
+
         # Setup for oversampled_chisq
         if self.oversampled_chisq:
             gal = fit_utils.setup_oversampled_chisq(gal)
@@ -314,18 +393,44 @@ class JAXNSFitter(base.Fitter):
             logger.addHandler(loggerfile)
 
         # ++++++++++++++++++++++++++++++++
-        # Build jaxns model
-        ndim = gal.model.nparams_free
-        logger.info(f"JAXNS: Fitting {ndim} free parameters")
+        # Build JAX-traceable log-likelihood
+        from dysmalpy.fitting.jax_loss import make_jaxns_log_likelihood
 
-        prior_model, param_names = _build_jaxns_prior_model(gal)
-        log_likelihood = _make_log_likelihood(gal, self)
+        (log_likelihood, traceable_param_info,
+         set_all_theta) = make_jaxns_log_likelihood(gal, self)
+        set_all_theta()  # ensure geometry params are set to current values
+
+        # Build prior model for traceable parameters only
+        prior_model, param_names = _build_jaxns_prior_model(
+            gal, traceable_param_info=traceable_param_info)
 
         jaxns_model = Model(prior_model=prior_model,
                             log_likelihood=log_likelihood)
 
+        ndim_traceable = traceable_param_info['n_traceable']
+        ndim_total = gal.model.nparams_free
+        logger.info(f"JAXNS: Fitting {ndim_traceable} traceable parameters "
+                     f"(of {ndim_total} total free)")
+        logger.info(f"JAXNS: Parameters: {param_names}")
         logger.info(f"JAXNS: Model U_ndims={jaxns_model.U_ndims}, "
                      f"num_params={jaxns_model.num_params}")
+
+        # Sanity check: verify log-likelihood is finite at initial params
+        pfree = gal.model.get_free_parameters_values()
+        from dysmalpy.fitting.jax_loss import _identify_traceable_params
+        _, _, orig_theta_indices = _identify_traceable_params(gal.model,
+                                                                include_geometry=True)
+        theta_init = jnp.array([pfree[i] for i in orig_theta_indices],
+                               dtype=jnp.float64)
+        try:
+            llike_init = float(log_likelihood(*theta_init))
+            logger.info(f"JAXNS: Initial log-likelihood = {llike_init:.2f}")
+            if not np.isfinite(llike_init):
+                raise ValueError(
+                    f"Initial log-likelihood is not finite: {llike_init}")
+        except Exception as e:
+            logger.error(f"JAXNS: Log-likelihood sanity check failed: {e}")
+            raise
 
         # Configure termination conditions
         term_cond = TerminationCondition(
@@ -421,6 +526,9 @@ class JAXNSFitter(base.Fitter):
                 obs = gal.observations[obs_name]
                 jaxnsResults.oversample_factor_chisq[obs_name] = obs.data.oversample_factor_chisq
 
+        # Store traceable param info for mapping posterior to full theta
+        jaxnsResults._traceable_param_info = traceable_param_info
+
         # Do all analysis, plotting, saving
         jaxnsResults._setup_samples_blobs()
 
@@ -436,17 +544,37 @@ class JAXNSFitter(base.Fitter):
         try:
             jaxnsResults.analyze_posterior_dist(gal=gal)
         except Exception as e:
-            logger.warning("JAXNS posterior analysis failed (likely too few samples): %s", e)
-            # Set bestfit_parameters from MAP estimate as fallback
-            best_fit = np.array([np.array(results.samples[pname]).flatten()
-                                  for pname in param_names]).T
-            jaxnsResults.bestfit_parameters = best_fit.mean(axis=0)
+            logger.warning("JAXNS posterior analysis failed: %s", e)
+            # Fallback: use median of equally-weighted posterior samples
+            if jaxnsResults.sampler is not None and jaxnsResults.sampler.samples is not None:
+                jaxnsResults.bestfit_parameters = np.median(
+                    jaxnsResults.sampler.samples, axis=0)
 
-        # Update model to best-fit and compute chi-squared
+        # Map traceable posterior best-fit to full theta vector.
+        # This must be done BEFORE _retie_parameters since the model currently
+        # has nparams_free=10 (8 original + 2 untied).
+        if jaxnsResults.bestfit_parameters is not None:
+            full_theta = gal.model.get_free_parameters_values()
+            reindexed = traceable_param_info['reindexed']
+            for (cmp_name, param_name), new_idx in reindexed:
+                orig_idx = traceable_param_info['orig_theta_indices'][new_idx]
+                full_theta[orig_idx] = jaxnsResults.bestfit_parameters[new_idx]
+            jaxnsResults.bestfit_parameters = full_theta
+
+        # Update model to best-fit BEFORE restoring tied status,
+        # since full_theta has the right length for the current (un-untied) model.
         gal.model.update_parameters(jaxnsResults.bestfit_parameters)
         gal.create_model_data()
         from dysmalpy.fitting.base import chisq_red
         jaxnsResults.bestfit_redchisq = chisq_red(gal)
+
+        # Now restore tied parameter status (for result reporting)
+        _retie_parameters(untied_info, gal)
+
+        # Re-extract bestfit_parameters from the model so its length matches
+        # the (now-retied) nparams_free=8.  The 10-element vector from the
+        # un-untied model is no longer valid for update_parameters().
+        jaxnsResults.bestfit_parameters = gal.model.get_free_parameters_values()
 
         # Save results
         if output_options.f_results is not None:
@@ -461,8 +589,14 @@ class JAXNSFitter(base.Fitter):
         # Plotting (best-effort)
         if output_options.do_plotting:
             try:
-                jaxnsResults.plot_results(gal, output_options=output_options,
-                                          overwrite=output_options.overwrite)
+                jaxnsResults.plot_results(
+                    gal,
+                    f_plot_param_corner=output_options.f_plot_param_corner,
+                    f_plot_bestfit=output_options.f_plot_bestfit,
+                    f_plot_trace=output_options.f_plot_trace,
+                    f_plot_run=output_options.f_plot_run,
+                    overwrite=output_options.overwrite,
+                    only_if_fname_set=True)
             except Exception as e:
                 logger.warning("JAXNS plotting failed: %s", e)
 
@@ -493,12 +627,7 @@ class JAXNSResults(base.BayesianFitResults, base.FitResults):
 
         self._jaxns_results = jaxns_results
         self._param_names = param_names
-
-        # Convert jaxns results to the format expected by BayesianFitResults
-        # BayesianFitResults expects:
-        #   - sampler_results: object with .samples, .blob, .importance_weights()
-        #   - chain_param_names: list of param names
-        #   - sampler: BayesianSampler with .samples, .blobs, .weights
+        self._traceable_param_info = None
 
         # Initialize parent with placeholder, then set up properly
         super(JAXNSResults, self).__init__(
@@ -517,7 +646,6 @@ class JAXNSResults(base.BayesianFitResults, base.FitResults):
         num_samples = int(np.array(results.total_num_samples).item())
 
         # jaxns results.samples is a dict of {param_name: array[num_samples]}
-        # We need to convert to a flat array [num_samples, ndim]
         samples_dict = results.samples
         log_dp = results.log_dp_mean[:num_samples]
 
@@ -534,20 +662,22 @@ class JAXNSResults(base.BayesianFitResults, base.FitResults):
             samples[:, i] = np.array(samples_dict[pname][:num_samples])
 
         # Resample to get equally weighted posterior samples
+        ess = int(results.ESS) if results.ESS is not None else num_samples
+        n_eq = max(100, min(num_samples, ess))
         try:
             eq_samples = np.array(resample(
                 jax.random.PRNGKey(123),
                 jax.tree.map(lambda x: x[:num_samples], samples_dict),
                 log_dp,
-                S=max(100, min(num_samples, int(results.ESS))),
+                S=n_eq,
                 replace=True
             ))
-            samples_eq = np.zeros((eq_samples.shape[1], ndim))
+            samples_eq = np.zeros((n_eq, ndim))
             for i, pname in enumerate(param_names):
                 samples_eq[:, i] = np.array(eq_samples[pname])
         except Exception:
-            # Fallback: use weighted samples directly
-            indices = np.random.choice(num_samples, size=num_samples,
+            # Fallback: use weighted random choice
+            indices = np.random.choice(num_samples, size=n_eq,
                                        p=weights, replace=True)
             samples_eq = samples[indices]
 
@@ -565,13 +695,33 @@ class JAXNSResults(base.BayesianFitResults, base.FitResults):
         )
 
         # Store the jaxns results as sampler_results for compatibility
-        # Use direct attribute assignment to avoid triggering the property
-        # setter which would recurse back into _setup_samples_blobs()
         self._sampler_results = _JAXNSResultWrapper(results, param_names)
 
+    def plot_corner(self, gal=None, fileout=None, overwrite=False):
+        """Plot/replot the corner plot for JAXNS posterior."""
+        from jaxns.plotting import plot_cornerplot as jaxns_plot_cornerplot
+
+        if self._jaxns_results is None:
+            raise ValueError("No JAXNS results available for corner plot")
+
+        if fileout is not None and not overwrite and os.path.isfile(fileout):
+            logger.warning("overwrite=False & file already exists: %s", fileout)
+            return
+
+        jaxns_plot_cornerplot(self._jaxns_results, save_name=fileout)
+
     def plot_run(self, fileout=None, overwrite=False):
-        """Plot/replot the trace for the fitting."""
-        plotting.plot_run(self, fileout=fileout, overwrite=overwrite)
+        """Plot/replot the run diagnostics for JAXNS."""
+        from jaxns.plotting import plot_diagnostics as jaxns_plot_diagnostics
+
+        if self._jaxns_results is None:
+            raise ValueError("No JAXNS results available for run plot")
+
+        if fileout is not None and not overwrite and os.path.isfile(fileout):
+            logger.warning("overwrite=False & file already exists: %s", fileout)
+            return
+
+        jaxns_plot_diagnostics(self._jaxns_results, save_name=fileout)
 
     def reload_sampler_results(self, filename=None):
         """Reload the JAXNS results saved earlier."""
