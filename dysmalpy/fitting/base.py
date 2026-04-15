@@ -804,7 +804,7 @@ def log_like(gal, fitter=None):
                 #err[((err==0) & (msk==0))] = 99.
                 chisq_arr_raw = (((dat - mod)/err)**2) * wgt_data + np.log( (2.*np.pi*err**2) / wgt_data )
                 if fitter.oversampled_chisq:
-                    invnu = 1. / obs.data.oversample_factor_chisq
+                    invnu = 1. / getattr(obs.data, 'oversample_factor_chisq', 1.0)
                 # elif fitter.red_chisq:
                 #     if gal.model.nparams_free > np.sum(msk) :
                 #         raise ValueError("More free parameters than data points!")
@@ -889,7 +889,7 @@ def log_like(gal, fitter=None):
                 ####
 
                 if fitter.oversampled_chisq:
-                    invnu = 1. / obs.data.oversample_factor_chisq
+                    invnu = 1. / getattr(obs.data, 'oversample_factor_chisq', 1.0)
                 # elif fitter.red_chisq:
                 #     if gal.model.nparams_free > fac_mask*np.sum(msk) :
                 #         raise ValueError("More free parameters than data points!")
@@ -916,7 +916,7 @@ def log_like(gal, fitter=None):
                 chisq_arr = ((((data - mod)/err)**2) * wgt_data + np.log((2.*np.pi*err**2) / wgt_data))
 
                 if fitter.oversampled_chisq:
-                    invnu = 1. / obs.data.oversample_factor_chisq
+                    invnu = 1. / getattr(obs.data, 'oversample_factor_chisq', 1.0)
                 # elif fitter.red_chisq:
                 #     if gal.model.nparams_free > np.sum(msk):
                 #         raise ValueError("More free parameters than data points!")

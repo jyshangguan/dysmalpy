@@ -286,6 +286,15 @@ class JAXNSFitter(base.Fitter):
         mod_in = copy.deepcopy(gal.model)
         gal.model = mod_in
 
+        # Rebind _model references in _param_instances after deepcopy.
+        # copy.deepcopy breaks the back-references from parameter copies
+        # to their owning component, which causes DysmalParameter.value
+        # to return stale/default values instead of the model's stored
+        # values, leading to -inf priors and 0% MCMC acceptance.
+        for comp_name, comp in gal.model.components.items():
+            for pname, pinst in getattr(comp, '_param_instances', {}).items():
+                object.__setattr__(pinst, '_model', comp)
+
         # Setup for oversampled_chisq
         if self.oversampled_chisq:
             gal = fit_utils.setup_oversampled_chisq(gal)
