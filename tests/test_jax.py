@@ -476,6 +476,96 @@ class TestTwoPowerHalo:
                 f"TPH circular_velocity({r}): got {result}, expected {exp}"
 
 
+class TestNoordFlatJAX:
+    """Test that NoordFlat circular_velocity and enclosed_mass are JAX-traceable."""
+
+    def setup_method(self):
+        self.nf = models.NoordFlat(n=1.0, invq=5.0)
+        self.r_eff = 5.0
+        self.mass = 1e11
+
+    def test_circular_velocity_matches_scipy(self):
+        """JAX interpolation matches scipy.interp1d to high precision."""
+        import scipy.interpolate as scp_interp
+
+        # Rebuild the scipy interpolator from the stored table data
+        vcirc_interp = scp_interp.interp1d(
+            np.array(self.nf._vcirc_R), np.array(self.nf._vcirc_V),
+            fill_value="extrapolate"
+        )
+
+        rarr = np.array([0., 1., 2., 5., 10., 15., 20.])
+        r_scaled = rarr / self.r_eff * self.nf.N2008_Re
+
+        result_jax = np.array(self.nf.circular_velocity(jnp.array(r_scaled / self.nf.N2008_Re * self.r_eff),
+                                                         self.r_eff, self.mass))
+        result_scp = vcirc_interp(r_scaled) * np.sqrt(
+            self.mass / self.nf.N2008_mass) * np.sqrt(self.nf.N2008_Re / self.r_eff)
+
+        np.testing.assert_allclose(result_jax, result_scp, rtol=1e-10, atol=1e-10)
+
+    def test_enclosed_mass_matches_scipy(self):
+        """JAX interpolation matches scipy.interp1d for enclosed mass."""
+        import scipy.interpolate as scp_interp
+
+        menc_interp = scp_interp.interp1d(
+            np.array(self.nf._menc_R), np.array(self.nf._menc_V),
+            fill_value="extrapolate"
+        )
+
+        rarr = np.array([0., 1., 2., 5., 10., 15., 20.])
+        r_scaled = rarr / self.r_eff * self.nf.N2008_Re
+
+        result_jax = np.array(self.nf.enclosed_mass(jnp.array(rarr), self.r_eff, self.mass))
+        result_scp = menc_interp(r_scaled) * (self.mass / self.nf.N2008_mass)
+
+        np.testing.assert_allclose(result_jax, result_scp, rtol=1e-10, atol=1e-10)
+
+    def test_circular_velocity_jit_compiles(self):
+        """circular_velocity is JIT-compilable and matches non-JIT."""
+        nf = self.nf
+        r_eff = self.r_eff
+        mass = self.mass
+
+        def fn(r):
+            return nf.circular_velocity(r, r_eff, mass)
+
+        r = jnp.array([0., 1., 2., 5., 10., 15.])
+        result_unjit = np.array(fn(r))
+        result_jit = np.array(jax.jit(fn)(r))
+
+        np.testing.assert_allclose(result_jit, result_unjit, rtol=1e-12, atol=1e-12)
+
+    def test_enclosed_mass_jit_compiles(self):
+        """enclosed_mass is JIT-compilable and matches non-JIT."""
+        nf = self.nf
+        r_eff = self.r_eff
+        mass = self.mass
+
+        def fn(r):
+            return nf.enclosed_mass(r, r_eff, mass)
+
+        r = jnp.array([0., 1., 2., 5., 10., 15.])
+        result_unjit = np.array(fn(r))
+        result_jit = np.array(jax.jit(fn)(r))
+
+        np.testing.assert_allclose(result_jit, result_unjit, rtol=1e-12, atol=1e-12)
+
+    def test_circular_velocity_grad_finite(self):
+        """Gradients of circular_velocity w.r.t. r are finite."""
+        nf = self.nf
+        r_eff = self.r_eff
+        mass = self.mass
+
+        def fn(r):
+            return jnp.sum(nf.circular_velocity(r, r_eff, mass))
+
+        r = jnp.array([1., 2., 5., 10.])
+        grads = jax.grad(fn)(r)
+        assert jnp.all(jnp.isfinite(grads)), \
+            f"Gradients should be finite, got: {grads}"
+
+
 # ===================================================================
 # 6. Utility function tests
 # ===================================================================

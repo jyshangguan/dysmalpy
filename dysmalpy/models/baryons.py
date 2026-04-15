@@ -24,7 +24,7 @@ from astropy.table import Table
 # Local imports
 from .base import MassModel, _LightMassModel, v_circular, \
                   sersic_mr, _I0_gaussring, G_PC_MSUN_KMSQ_EFF, \
-                  _safe_gammaincinv, xp_dispatch
+                  _safe_gammaincinv, xp_dispatch, _interp1d_extrap
 # from .base import menc_from_vcirc
 from dysmalpy.parameters import DysmalParameter
 from dysmalpy.special import bessel_k0, bessel_k1
@@ -314,12 +314,8 @@ class NoordFlat(object):
         self.N2008_Re =      table['Reff']
         self.N2008_mass =    table['total_mass']
 
-        self.vcirc_interp = scp_interp.interp1d(N2008_rad, N2008_vcirc,
-                                       fill_value="extrapolate")
-        # vcirc = (v_interp(r / r_eff * N2008_Re) * np.sqrt(
-        #          mass / N2008_mass) * np.sqrt(N2008_Re / r_eff))
-
-        # return vcirc
+        self._vcirc_R = jnp.asarray(np.asarray(N2008_rad, dtype=np.float64))
+        self._vcirc_V = jnp.asarray(np.asarray(N2008_vcirc, dtype=np.float64))
 
     def _set_menc_interp(self):
         table = self.read_deprojected_sersic_table()
@@ -332,8 +328,8 @@ class NoordFlat(object):
             table_Rad = np.append(0., table_Rad)
             table_menc = np.append(0., table_menc)
 
-        self.menc_interp = scp_interp.interp1d(table_Rad, table_menc, 
-                                        fill_value="extrapolate")
+        self._menc_R = jnp.asarray(np.asarray(table_Rad, dtype=np.float64))
+        self._menc_V = jnp.asarray(np.asarray(table_menc, dtype=np.float64))
 
     def circular_velocity(self, r, r_eff, mass):
         """
@@ -367,8 +363,9 @@ class NoordFlat(object):
         ----------
         `Noordermeer 2008 <https://ui.adsabs.harvard.edu/abs/2008MNRAS.385.1359N/abstract>`_
         """
-        vcirc = (self.vcirc_interp(r / r_eff * self.N2008_Re) * np.sqrt(
-                 mass / self.N2008_mass) * np.sqrt(self.N2008_Re / r_eff))
+        r_scaled = r / r_eff * self.N2008_Re
+        vcirc_table = _interp1d_extrap(r_scaled, self._vcirc_R, self._vcirc_V)
+        vcirc = vcirc_table * jnp.sqrt(mass / self.N2008_mass) * jnp.sqrt(self.N2008_Re / r_eff)
 
         return vcirc
 
@@ -408,7 +405,9 @@ class NoordFlat(object):
         `Price et al. 2022 <https://ui.adsabs.harvard.edu/abs/2022A%26A...665A.159P/abstract>`_
         """
 
-        menc = self.menc_interp(r / r_eff * self.N2008_Re) * (mass / self.N2008_mass)
+        r_scaled = r / r_eff * self.N2008_Re
+        menc_table = _interp1d_extrap(r_scaled, self._menc_R, self._menc_V)
+        menc = menc_table * (mass / self.N2008_mass)
         
         # # TEST:
         # print("USING OLD vcirc from menc! (baryons.py)")

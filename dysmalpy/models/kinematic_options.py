@@ -16,7 +16,7 @@ import jax.numpy as jnp
 
 # Local imports
 from .baryons import DiskBulge, LinearDiskBulge, Sersic, ExpDisk
-from .base import _safe_gammaincinv
+from .base import _safe_gammaincinv, _interp1d_extrap
 
 __all__ = ['KinematicOptions']
 
@@ -28,42 +28,6 @@ logger.setLevel(logging.INFO)
 
 import warnings
 warnings.filterwarnings("ignore")
-
-
-# ------------------------------------------------------------------
-# Helper: JAX-compatible 1D linear interpolation with extrapolation
-# ------------------------------------------------------------------
-def _interp1d_extrap(x, xp, fp):
-    """JAX-traceable 1D linear interpolation with linear extrapolation.
-
-    Parameters
-    ----------
-    x : array_like
-        Query points.
-    xp : array_like
-        1-D sequence of x-coordinates (must be strictly increasing).
-    fp : array_like
-        1-D sequence of y-coordinates, same length as xp.
-
-    Returns
-    -------
-    array_like
-        Interpolated values, with linear extrapolation outside xp range.
-    """
-    # jnp.interp clips to [xp[0], xp[-1]]; we add manual extrapolation.
-    result = jnp.interp(x, xp, fp)
-
-    # Left extrapolation: x < xp[0]
-    left_slope = (fp[1] - fp[0]) / (xp[1] - xp[0])
-    left_extrap = fp[0] + left_slope * (x - xp[0])
-    result = jnp.where(x < xp[0], left_extrap, result)
-
-    # Right extrapolation: x > xp[-1]
-    right_slope = (fp[-1] - fp[-2]) / (xp[-1] - xp[-2])
-    right_extrap = fp[-1] + right_slope * (x - xp[-1])
-    result = jnp.where(x > xp[-1], right_extrap, result)
-
-    return result
 
 
 # ------------------------------------------------------------------
