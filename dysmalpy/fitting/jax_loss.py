@@ -19,7 +19,7 @@ import numpy as np
 
 
 __all__ = ['make_jax_loss_function', 'make_jax_log_prob_function',
-           'make_jax_loss_function_1d']
+           'make_jax_loss_function_1d', 'make_jaxns_log_likelihood']
 
 
 def _precompute_cube_ai(model_set, obs, dscale):
@@ -128,20 +128,117 @@ def _precompute_cube_ai(model_set, obs, dscale):
     return result
 
 
+def _precompute_sky_grids(model_set, obs, dscale):
+    """Pre-compute sky-frame coordinate grids with concrete geometry values.
+
+    Extracts the grid setup logic from ``simulate_cube`` so that the JIT-
+    compiled loss function never calls shape-dependent grid computation on
+    traced geometry parameters.  The returned dict can be passed as
+    ``sky_grids_precomputed`` to ``simulate_cube``.
+
+    Only supports ``transform_method='direct'`` with the default ``angle='cos'``,
+    where ``nz_sky_samp = max(nx_sky_samp, ny_sky_samp)`` is independent of
+    the geometry parameters.
+
+    Returns
+    -------
+    dict or None
+        ``None`` if transform_method is not ``'direct'``.  Otherwise a dict
+        with keys: ``'sh'``, ``'xsky'``, ``'ysky'``, ``'zsky'``,
+        ``'xcenter_samp'``, ``'ycenter_samp'``, ``'zc_samp'``, ``'maxr'``,
+        ``'maxr_y'``, ``'nx_sky_samp'``, ``'ny_sky_samp'``, ``'oversample'``,
+        ``'to_kpc'``, ``'pixscale_samp'``.
+    """
+    from astropy import units as u
+
+    from dysmalpy.models.model_set import (
+        _calculate_max_skyframe_extents,
+    )
+
+    transform_method = obs.mod_options.transform_method.lower().strip()
+    if transform_method != 'direct':
+        return None
+
+    nx_sky = obs.instrument.fov[0]
+    ny_sky = obs.instrument.fov[1]
+    pixscale = obs.instrument.pixscale.to(u.arcsec).value
+    oversample = obs.mod_options.oversample
+    oversize = obs.mod_options.oversize
+    xcenter = obs.mod_options.xcenter
+    ycenter = obs.mod_options.ycenter
+
+    nx_sky_samp = nx_sky * oversample * oversize
+    ny_sky_samp = ny_sky * oversample * oversize
+    pixscale_samp = pixscale / oversample
+    to_kpc = pixscale_samp / dscale
+
+    if (np.mod(nx_sky, 2) == 1) & (np.mod(oversize, 2) == 0) & (oversize > 1):
+        nx_sky_samp = nx_sky_samp + 1
+    if (np.mod(ny_sky, 2) == 1) & (np.mod(oversize, 2) == 0) & (oversize > 1):
+        ny_sky_samp = ny_sky_samp + 1
+
+    if xcenter is None:
+        xcenter_samp = (nx_sky_samp - 1) / 2.
+    else:
+        xcenter_samp = (xcenter + 0.5) * oversample - 0.5
+    if ycenter is None:
+        ycenter_samp = (ny_sky_samp - 1) / 2.
+    else:
+        ycenter_samp = (ycenter + 0.5) * oversample - 0.5
+
+    geom = model_set.geometries.get(obs.name)
+    if geom is None:
+        return None
+
+    nz_sky_samp, maxr, maxr_y = _calculate_max_skyframe_extents(
+        geom, nx_sky_samp, ny_sky_samp, transform_method, angle='cos')
+
+    sh = (nz_sky_samp, ny_sky_samp, nx_sky_samp)
+    zc_samp = (nz_sky_samp - 1) / 2.
+
+    # Sky-frame grids (no geometry dependency)
+    zsky, ysky, xsky = np.indices(sh)
+    zsky = zsky - zc_samp
+    ysky = ysky - ycenter_samp
+    xsky = xsky - xcenter_samp
+
+    return {
+        'sh': sh,
+        'xsky': xsky,
+        'ysky': ysky,
+        'zsky': zsky,
+        'xcenter_samp': xcenter_samp,
+        'ycenter_samp': ycenter_samp,
+        'zc_samp': zc_samp,
+        'maxr': maxr,
+        'maxr_y': maxr_y,
+        'nx_sky_samp': nx_sky_samp,
+        'ny_sky_samp': ny_sky_samp,
+        'oversample': oversample,
+        'to_kpc': to_kpc,
+        'pixscale_samp': pixscale_samp,
+    }
+
+
 def _storage_name(name):
     """Return the instance-attribute name used to store *name*'s value."""
     return '_param_value_{}'.format(name)
 
 
-def _identify_traceable_params(model_set):
+def _identify_traceable_params(model_set, include_geometry=False):
     """Identify free parameters that can be JAX-traced.
 
-    Geometry parameters (inc, pa, xshift, yshift) are excluded because they
-    affect array shapes in grid computation (numpy requires concrete values).
+    By default, geometry parameters (inc, pa, xshift, yshift) are excluded
+    because they can affect array shapes in grid computation (numpy requires
+    concrete values).  When *include_geometry* is True, all free parameters
+    are included — this is safe when using ``sky_grids_precomputed`` to fix
+    the grid shapes with concrete values.
 
     Parameters
     ----------
     model_set : ModelSet
+    include_geometry : bool
+        If True, include geometry component parameters in the traceable set.
 
     Returns
     -------
@@ -154,18 +251,22 @@ def _identify_traceable_params(model_set):
     """
     param_map = model_set.get_param_storage_names()
 
-    # Identify geometry components
-    geom_component_names = set()
-    for cmp_name, comp in model_set.components.items():
-        if getattr(comp, '_type', None) == 'geometry':
-            geom_component_names.add(cmp_name)
+    if include_geometry:
+        # Include all free parameters
+        traceable_entries = sorted(param_map.items(), key=lambda x: x[1])
+    else:
+        # Identify geometry components
+        geom_component_names = set()
+        for cmp_name, comp in model_set.components.items():
+            if getattr(comp, '_type', None) == 'geometry':
+                geom_component_names.add(cmp_name)
 
-    # Filter out geometry params
-    traceable_entries = sorted(
-        [(k, v) for k, v in param_map.items()
-         if k[0] not in geom_component_names],
-        key=lambda x: x[1],
-    )
+        # Filter out geometry params
+        traceable_entries = sorted(
+            [(k, v) for k, v in param_map.items()
+             if k[0] not in geom_component_names],
+            key=lambda x: x[1],
+        )
 
     reindexed = [(k, new_idx)
                  for new_idx, (k, _) in enumerate(traceable_entries)]
@@ -404,6 +505,16 @@ def make_jax_log_prob_function(model_set, obs, dscale, cube_obs, noise,
 
     reindexed, n_traceable, orig_theta_indices = _identify_traceable_params(model_set)
 
+    # Pre-compute the sparse index array (ai) for z-truncation using
+    # concrete (non-traced) values.  This avoids dynamic boolean indexing
+    # inside the JIT-compiled loss function.
+    ai_precomputed = None
+    ai_sky_precomputed = None
+    if obs.mod_options.zcalc_truncate:
+        _ai_precomputed = _precompute_cube_ai(model_set, obs, dscale)
+        ai_precomputed = _ai_precomputed.get('ai')
+        ai_sky_precomputed = _ai_precomputed.get('ai_sky')
+
     # Extract convolution kernels if requested
     _beam_kernel_jax = None
     _lsf_kernel_jax = None
@@ -447,7 +558,9 @@ def make_jax_log_prob_function(model_set, obs, dscale, cube_obs, noise,
         # Likelihood (always compute; JAX will optimize away if lp is -inf
         # via jnp.where at the end)
         _inject_tracers(theta_traceable)
-        cube_model, _ = model_set.simulate_cube(obs, dscale)
+        cube_model, _ = model_set.simulate_cube(obs, dscale,
+                                                 ai_precomputed=ai_precomputed,
+                                                 ai_sky_precomputed=ai_sky_precomputed)
 
         # Rebin from oversampled to native pixel scale
         if _do_rebin:
@@ -484,6 +597,302 @@ def make_jax_log_prob_function(model_set, obs, dscale, cube_obs, noise,
         model_set.update_parameters(theta_full)
 
     return log_prob_fn, get_traceable_theta, set_all_theta
+
+
+def make_jaxns_log_likelihood(gal, fitter):
+    """Return a JAX-traceable log-likelihood function for jaxns.
+
+    Unlike ``make_jax_loss_function`` which returns half chi-squared, this
+    returns log-likelihood only (-0.5 * chi_sq) since jaxns handles priors
+    via its own ``Prior`` objects.  The function signature is
+    ``log_likelihood(*theta_tuple)`` where each argument is a scalar,
+    matching jaxns's prior model output.
+
+    Supports both 3D (cube) and 2D (map) observations.  For 2D maps,
+    velocity and dispersion maps are extracted from the simulated 3D cube
+    using JAX-traceable moment extraction.
+
+    Parameters
+    ----------
+    gal : Galaxy
+        Galaxy instance with model and observations.
+    fitter : Fitter
+        Fitter instance (used for oversampled_chisq setting).
+
+    Returns
+    -------
+    log_likelihood : callable
+        ``log_likelihood(*theta_tuple) -> float``
+    traceable_param_info : dict
+        ``{'reindexed': [...], 'n_traceable': int, 'orig_theta_indices': [...]}``
+    set_all_theta : callable
+        ``set_all_theta(theta_full) -> None``
+    """
+    model_set = gal.model
+    reindexed, n_traceable, orig_theta_indices = _identify_traceable_params(
+        model_set, include_geometry=True)
+
+    traceable_param_info = {
+        'reindexed': reindexed,
+        'n_traceable': n_traceable,
+        'orig_theta_indices': orig_theta_indices,
+    }
+
+    # Pre-compute data, kernels, and dimensions for each observation
+    _obs_data = []
+    for obs_name in gal.observations:
+        obs = gal.observations[obs_name]
+
+        if not obs.fit_options.fit:
+            continue
+
+        ndim = obs.data.ndim
+        dscale = gal.dscale
+
+        # Pre-compute ai for z-truncation
+        ai_precomputed = None
+        ai_sky_precomputed = None
+        if obs.mod_options.zcalc_truncate:
+            _ai = _precompute_cube_ai(model_set, obs, dscale)
+            ai_precomputed = _ai.get('ai')
+            ai_sky_precomputed = _ai.get('ai_sky')
+
+        # Pre-compute sky grids (allows geometry params to be JAX-traced)
+        sky_grids = None
+        if obs.mod_options.transform_method.lower().strip() == 'direct':
+            sky_grids = _precompute_sky_grids(model_set, obs, dscale)
+
+        # Extract convolution kernels
+        _beam_kernel_jax = None
+        _lsf_kernel_jax = None
+        if obs.instrument is not None:
+            from dysmalpy.convolution import get_jax_kernels
+            beam_np, lsf_np = get_jax_kernels(obs.instrument)
+            if beam_np is not None:
+                _beam_kernel_jax = jnp.asarray(beam_np)
+            if lsf_np is not None:
+                _lsf_kernel_jax = jnp.asarray(lsf_np)
+
+        _do_convolve = (_beam_kernel_jax is not None or _lsf_kernel_jax is not None)
+
+        # Pre-compute rebin/crop dimensions
+        oversample = obs.mod_options.oversample
+        oversize = obs.mod_options.oversize
+        _do_rebin = (oversample > 1)
+        _do_crop = (oversize > 1)
+
+        _rebin_ny = _rebin_nx = None
+        _crop_y_start = _crop_y_end = _crop_x_start = _crop_x_end = None
+
+        if _do_rebin or _do_crop:
+            from dysmalpy.convolution import _rebin_spatial
+            nx_sky = obs.instrument.fov[0]
+            ny_sky = obs.instrument.fov[1]
+            _rebin_ny = ny_sky * oversize
+            _rebin_nx = nx_sky * oversize
+            _crop_y_start = (_rebin_ny - ny_sky) // 2
+            _crop_y_end = _crop_y_start + ny_sky
+            _crop_x_start = (_rebin_nx - nx_sky) // 2
+            _crop_x_end = _crop_x_start + nx_sky
+
+        weight = float(obs.weight)
+
+        # Oversampled chi-squared factor
+        invnu = 1.0
+        if fitter.oversampled_chisq:
+            invnu = 1.0 / getattr(obs.data, 'oversample_factor_chisq', 1.0)
+
+        obs_entry = {
+            'obs': obs,
+            'ndim': ndim,
+            'dscale': dscale,
+            'ai_precomputed': ai_precomputed,
+            'ai_sky_precomputed': ai_sky_precomputed,
+            'sky_grids': sky_grids,
+            'beam_kernel': _beam_kernel_jax,
+            'lsf_kernel': _lsf_kernel_jax,
+            'do_convolve': _do_convolve,
+            'do_rebin': _do_rebin,
+            'do_crop': _do_crop,
+            'rebin_ny': _rebin_ny,
+            'rebin_nx': _rebin_nx,
+            'crop_y_start': _crop_y_start,
+            'crop_y_end': _crop_y_end,
+            'crop_x_start': _crop_x_start,
+            'crop_x_end': _crop_x_end,
+            'weight': weight,
+            'invnu': invnu,
+        }
+
+        if ndim == 3:
+            # 3D cube fitting: compare model cube to observed cube
+            cube_obs = jnp.asarray(np.asarray(
+                obs.data.data.unmasked_data[:].value, dtype=np.float64))
+            noise = jnp.asarray(np.asarray(
+                obs.data.error.unmasked_data[:].value, dtype=np.float64))
+            msk = obs.data.mask
+
+            # Replace zero errors in unmasked pixels with large values
+            noise_np = np.asarray(noise)
+            msk_np = np.asarray(msk)
+            noise_np = np.where((noise_np == 0) & (msk_np == 0), 99., noise_np)
+            noise = jnp.asarray(noise_np)
+
+            obs_entry['cube_obs'] = cube_obs
+            obs_entry['noise'] = noise
+            obs_entry['mask'] = jnp.asarray(msk)
+
+        elif ndim == 2:
+            # 2D map fitting: extract velocity/dispersion maps from cube
+            # using moment extraction (JAX-traceable alternative to Gaussian fitting)
+            vel_obs = jnp.asarray(np.asarray(
+                obs.data.data['velocity'], dtype=np.float64))
+            vel_err = jnp.asarray(np.asarray(
+                obs.data.error['velocity'], dtype=np.float64))
+            msk = obs.data.mask
+
+            # Replace zero errors in unmasked pixels
+            vel_err_np = np.asarray(vel_err)
+            msk_np = np.asarray(msk)
+            vel_err_np = np.where((vel_err_np == 0) & (msk_np == 0), 99., vel_err_np)
+            vel_err = jnp.asarray(vel_err_np)
+
+            obs_entry['vel_obs'] = vel_obs
+            obs_entry['vel_err'] = vel_err
+            obs_entry['mask'] = jnp.asarray(msk)
+            obs_entry['fit_velocity'] = obs.fit_options.fit_velocity
+
+            if obs.fit_options.fit_dispersion:
+                disp_obs = jnp.asarray(np.asarray(
+                    obs.data.data['dispersion'], dtype=np.float64))
+                disp_err = jnp.asarray(np.asarray(
+                    obs.data.error['dispersion'], dtype=np.float64))
+                disp_err_np = np.asarray(disp_err)
+                disp_err_np = np.where((disp_err_np == 0) & (msk_np == 0), 99., disp_err_np)
+                disp_err = jnp.asarray(disp_err_np)
+
+                obs_entry['disp_obs'] = disp_obs
+                obs_entry['disp_err'] = disp_err
+                obs_entry['fit_dispersion'] = True
+            else:
+                obs_entry['fit_dispersion'] = False
+
+            # Instrument correction for dispersion
+            inst_corr = obs.data.data.get('inst_corr', False)
+            lsf_disp2 = 0.0
+            if inst_corr and obs.instrument.lsf is not None:
+                lsf_disp_val = obs.instrument.lsf.dispersion
+                if hasattr(lsf_disp_val, 'unit'):
+                    import astropy.units as au
+                    lsf_disp2 = float(lsf_disp_val.to(au.km / au.s).value) ** 2
+                else:
+                    lsf_disp2 = float(lsf_disp_val) ** 2
+            obs_entry['inst_corr'] = inst_corr
+            obs_entry['lsf_disp2'] = lsf_disp2
+
+            # Spectral axis for moment extraction
+            nspec = obs.instrument.nspec
+            spec_start = float(obs.instrument.spec_start.value)
+            spec_step = float(obs.instrument.spec_step.value)
+            spec_arr = np.asarray(
+                spec_start + np.arange(nspec) * spec_step, dtype=np.float64)
+            delspec = float(np.mean(spec_arr[1:] - spec_arr[:-1]))
+            obs_entry['spec_arr'] = jnp.asarray(spec_arr)
+            obs_entry['delspec'] = delspec
+
+        else:
+            raise NotImplementedError(
+                f"make_jaxns_log_likelihood does not support ndim={ndim}")
+
+        _obs_data.append(obs_entry)
+
+    def _inject_tracers(theta_traceable):
+        """Inject JAX tracer values into model parameter storage."""
+        for (cmp_name, param_name), theta_idx in reindexed:
+            comp = model_set.components[cmp_name]
+            sname = _storage_name(param_name)
+            object.__setattr__(comp, sname, theta_traceable[theta_idx])
+
+    def log_likelihood(*theta_tuple):
+        # Convert tuple of scalars to flat array
+        theta_traceable = jnp.array([jnp.atleast_1d(v)[0] for v in theta_tuple])
+        _inject_tracers(theta_traceable)
+
+        total_llike = jnp.array(0.0)
+
+        for od in _obs_data:
+            cube_model, _ = model_set.simulate_cube(
+                od['obs'], od['dscale'],
+                ai_precomputed=od['ai_precomputed'],
+                ai_sky_precomputed=od['ai_sky_precomputed'],
+                sky_grids_precomputed=od['sky_grids'])
+
+            if od['do_rebin']:
+                from dysmalpy.convolution import _rebin_spatial
+                cube_model = _rebin_spatial(cube_model, od['rebin_ny'], od['rebin_nx'])
+
+            if od['do_convolve']:
+                from dysmalpy.convolution import convolve_cube_jax
+                cube_model = convolve_cube_jax(cube_model,
+                                               beam_kernel=od['beam_kernel'],
+                                               lsf_kernel=od['lsf_kernel'])
+
+            if od['do_crop']:
+                cube_model = cube_model[:,
+                                       od['crop_y_start']:od['crop_y_end'],
+                                       od['crop_x_start']:od['crop_x_end']]
+
+            if od['ndim'] == 3:
+                # Cube-based chi-squared
+                chi_sq = jnp.sum(
+                    ((cube_model - od['cube_obs']) / od['noise']) ** 2 * od['mask'])
+                total_llike += -0.5 * chi_sq * od['invnu'] * od['weight']
+
+            elif od['ndim'] == 2:
+                # Extract 2D velocity/dispersion maps from cube via moment extraction
+                spec_arr = od['spec_arr']
+                delspec = od['delspec']
+                msk = od['mask']
+
+                # flux map: (ny, nx)
+                flux_map = jnp.nansum(cube_model, axis=0) * delspec
+
+                # velocity map: (ny, nx)
+                vel_map = (jnp.nansum(
+                    cube_model * spec_arr[:, None, None], axis=0) * delspec
+                    / jnp.where(flux_map != 0, flux_map, 1.))
+
+                # dispersion map: (ny, nx)
+                disp_map = jnp.sqrt(jnp.abs(
+                    jnp.nansum(
+                        cube_model * (spec_arr[:, None, None] - vel_map[None, :, :]) ** 2,
+                        axis=0) * delspec
+                    / jnp.where(flux_map != 0, flux_map, 1.)))
+
+                chi_sq = jnp.array(0.0)
+
+                if od['fit_velocity']:
+                    chi_sq += jnp.sum(
+                        ((vel_map - od['vel_obs']) / od['vel_err']) ** 2 * msk)
+
+                if od['fit_dispersion']:
+                    disp_mod = disp_map
+                    if od['inst_corr']:
+                        disp_mod = jnp.sqrt(
+                            jnp.maximum(disp_mod ** 2 - od['lsf_disp2'], 0.))
+                    chi_sq += jnp.sum(
+                        ((disp_mod - od['disp_obs']) / od['disp_err']) ** 2 * msk)
+
+                total_llike += -0.5 * chi_sq * od['invnu'] * od['weight']
+
+        return total_llike
+
+    def set_all_theta(theta_full=None):
+        """Set all free parameters. If theta_full is None, use current values."""
+        if theta_full is not None:
+            model_set.update_parameters(theta_full)
+
+    return log_likelihood, traceable_param_info, set_all_theta
 
 
 def extract_1d_moments_jax(cube, spec_arr, aperture_masks):

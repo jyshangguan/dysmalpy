@@ -16,6 +16,7 @@ from collections import OrderedDict
 from .base import _DysmalModel, menc_from_vcirc
 from .kinematic_options import KinematicOptions
 from .dimming import ConstantDimming
+from .geometry import Geometry
 
 try:
    import dysmalpy.models.utils as model_utils
@@ -1314,7 +1315,7 @@ class ModelSet:
 
 
     def simulate_cube(self, obs=None, dscale=None, ai_precomputed=None,
-                      ai_sky_precomputed=None):
+                      ai_sky_precomputed=None, sky_grids_precomputed=None):
         r"""
         Simulate a line emission cube of this model set
 
@@ -1335,6 +1336,13 @@ class ModelSet:
             Pre-computed sparse index array for z-truncation (rotate method).
             If provided, skips the internal ``_make_cube_ai`` call for the
             sky-frame path (needed for JIT tracing).
+
+        sky_grids_precomputed : dict or None
+            Pre-computed sky-frame coordinate grids (from
+            ``_precompute_sky_grids``).  If provided, skips grid setup and
+            applies the geometry transform using ``Geometry.evaluate`` directly,
+            bypassing the descriptor ``__set__`` for xshift/yshift oversample.
+            This allows geometry parameters to be JAX-traced.
 
         Returns
         -------
@@ -1395,25 +1403,42 @@ class ModelSet:
         # the z size where z is in the direction of the L.O.S.
         # We'll just use the maximum of the given x and y
 
-        nx_sky_samp = nx_sky*oversample*oversize
-        ny_sky_samp = ny_sky*oversample*oversize
-        pixscale_samp = pixscale/oversample
-        to_kpc = pixscale_samp / dscale
-
-        if (np.mod(nx_sky, 2) == 1) & (np.mod(oversize, 2) == 0) & (oversize > 1):
-            nx_sky_samp = nx_sky_samp + 1
-
-        if (np.mod(ny_sky, 2) == 1) & (np.mod(oversize, 2) == 0) & (oversize > 1):
-            ny_sky_samp = ny_sky_samp + 1
-
-        if xcenter is None:
-            xcenter_samp = (nx_sky_samp - 1) / 2.
+        if sky_grids_precomputed is not None:
+            sg = sky_grids_precomputed
+            sh = sg['sh']
+            nz_sky_samp = sh[0]
+            xsky = sg['xsky']
+            ysky = sg['ysky']
+            zsky = sg['zsky']
+            maxr = sg['maxr']
+            maxr_y = sg['maxr_y']
+            oversample = sg['oversample']
+            to_kpc = sg['to_kpc']
+            xcenter_samp = sg['xcenter_samp']
+            ycenter_samp = sg['ycenter_samp']
+            pixscale_samp = sg['pixscale_samp']
+            nx_sky_samp = sg['nx_sky_samp']
+            ny_sky_samp = sg['ny_sky_samp']
         else:
-            xcenter_samp = (xcenter + 0.5)*oversample - 0.5
-        if ycenter is None:
-            ycenter_samp = (ny_sky_samp - 1) / 2.
-        else:
-            ycenter_samp = (ycenter + 0.5)*oversample - 0.5
+            nx_sky_samp = nx_sky*oversample*oversize
+            ny_sky_samp = ny_sky*oversample*oversize
+            pixscale_samp = pixscale/oversample
+            to_kpc = pixscale_samp / dscale
+
+            if (np.mod(nx_sky, 2) == 1) & (np.mod(oversize, 2) == 0) & (oversize > 1):
+                nx_sky_samp = nx_sky_samp + 1
+
+            if (np.mod(ny_sky, 2) == 1) & (np.mod(oversize, 2) == 0) & (oversize > 1):
+                ny_sky_samp = ny_sky_samp + 1
+
+            if xcenter is None:
+                xcenter_samp = (nx_sky_samp - 1) / 2.
+            else:
+                xcenter_samp = (xcenter + 0.5)*oversample - 0.5
+            if ycenter is None:
+                ycenter_samp = (ny_sky_samp - 1) / 2.
+            else:
+                ycenter_samp = (ycenter + 0.5)*oversample - 0.5
 
 
         # Setup the final IFU cube
@@ -1435,26 +1460,38 @@ class ModelSet:
         # First construct the cube based on mass components
         if sum(self.mass_components.values()) > 0:
 
-            # Create 3D arrays of the sky / galaxy pixel coordinates
-            nz_sky_samp, maxr, maxr_y = _calculate_max_skyframe_extents(geom,
-                    nx_sky_samp, ny_sky_samp, transform_method)
+            if sky_grids_precomputed is not None:
+                # Grids already computed; apply geometry transform directly
+                # using Geometry.evaluate with traced values.
+                xshift_os = geom.xshift.value * oversample
+                yshift_os = geom.yshift.value * oversample
+                xgal, ygal, zgal = Geometry.evaluate(
+                    xsky, ysky, zsky,
+                    geom.inc.value, geom.pa.value,
+                    xshift_os, yshift_os,
+                    geom.vel_shift.value
+                )
+            else:
+                # Create 3D arrays of the sky / galaxy pixel coordinates
+                nz_sky_samp, maxr, maxr_y = _calculate_max_skyframe_extents(geom,
+                        nx_sky_samp, ny_sky_samp, transform_method)
 
-            # Apply the geometric transformation to get galactic coordinates
-            # Need to account for oversampling in the x and y shift parameters
-            geom.xshift = geom.xshift.value * oversample
-            geom.yshift = geom.yshift.value * oversample
-            sh = (nz_sky_samp, ny_sky_samp, nx_sky_samp)
+                # Apply the geometric transformation to get galactic coordinates
+                # Need to account for oversampling in the x and y shift parameters
+                geom.xshift = geom.xshift.value * oversample
+                geom.yshift = geom.yshift.value * oversample
+                sh = (nz_sky_samp, ny_sky_samp, nx_sky_samp)
 
-            # Regularly gridded in galaxy space
-            #   -- just use the number values from sky space for simplicity
-            if transform_method.lower().strip() == 'direct':
-                xgal, ygal, zgal, xsky, ysky, zsky = _get_xyz_sky_gal(geom, sh,
-                        xcenter_samp, ycenter_samp, (nz_sky_samp - 1) / 2.)
+                # Regularly gridded in galaxy space
+                #   -- just use the number values from sky space for simplicity
+                if transform_method.lower().strip() == 'direct':
+                    xgal, ygal, zgal, xsky, ysky, zsky = _get_xyz_sky_gal(geom, sh,
+                            xcenter_samp, ycenter_samp, (nz_sky_samp - 1) / 2.)
 
-            # Regularly gridded in sky space, will be rotated later
-            elif transform_method.lower().strip() == 'rotate':
-                xgal, ygal, zgal, xsky, ysky, zsky = _get_xyz_sky_gal_inverse(geom, sh,
-                        xcenter_samp, ycenter_samp, (nz_sky_samp - 1) / 2.)
+                # Regularly gridded in sky space, will be rotated later
+                elif transform_method.lower().strip() == 'rotate':
+                    xgal, ygal, zgal, xsky, ysky, zsky = _get_xyz_sky_gal_inverse(geom, sh,
+                            xcenter_samp, ycenter_samp, (nz_sky_samp - 1) / 2.)
 
 
             # The circular velocity at each position only depends on the radius
@@ -1814,8 +1851,9 @@ class ModelSet:
                 # +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
             # Remove the oversample from the geometry xyshift
-            geom.xshift = geom.xshift.value / oversample
-            geom.yshift = geom.yshift.value / oversample
+            if sky_grids_precomputed is None:
+                geom.xshift = geom.xshift.value / oversample
+                geom.yshift = geom.yshift.value / oversample
 
 
         #######

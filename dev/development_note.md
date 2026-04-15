@@ -379,6 +379,59 @@ MPFIT doesn't check their bounds.
 
 ---
 
+### Phase 11: Make Geometry Parameters JAX-Traceable for JAXNS Fitting
+
+**Goal:** Allow JAXNS to fit all 10 free parameters (5 original + 5 geometry) instead
+of only 5 (total_mass, r_eff_disk, fdm, sigma0, sigmaz). Previously, geometry params
+(inc, pa, xshift, yshift, vel_shift) were held fixed because they were excluded from
+JAX tracing.
+
+**Analysis:** For the default `direct` transform method with `angle='cos'`, the grid
+shape `nz_sky_samp = max(nx_sky_samp, ny_sky_samp)` is independent of geometry
+parameters. The sky-frame coordinate grids (xsky, ysky, zsky) are also independent
+of geometry — only the galaxy-frame transform depends on inc/pa/shifts, and that
+transform (`Geometry.evaluate`) is already fully JAX-traceable (uses `jnp.sin`,
+`jnp.cos`).
+
+**Steps completed:**
+1. Added `include_geometry=False` parameter to `_identify_traceable_params()` in
+   `jax_loss.py`. When `True`, all free parameters including geometry components
+   are included in the traceable set. Default `False` preserves backward
+   compatibility for `make_jax_loss_function` and `make_jax_log_prob_function`.
+2. Added `_precompute_sky_grids()` in `jax_loss.py` — extracts the grid setup
+   logic from `simulate_cube` to pre-compute sky-frame coordinate grids with
+   concrete geometry values. Returns a dict with `sh`, `xsky`, `ysky`, `zsky`,
+   centers, `maxr`, `maxr_y`, `oversample`, `to_kpc`, `pixscale_samp`.
+3. Added `sky_grids_precomputed=None` parameter to `simulate_cube()` in
+   `model_set.py`. When provided:
+   - Skips grid setup (uses pre-computed grids)
+   - Bypasses descriptor `__set__` for xshift/yshift oversample
+   - Calls `Geometry.evaluate()` directly with traced geometry values
+   - Skips xshift/yshift restore at the end (not needed since descriptor
+     was never modified)
+4. Updated `make_jaxns_log_likelihood()` to pass `include_geometry=True` to
+   `_identify_traceable_params`, pre-compute sky grids for each observation,
+   and pass `sky_grids_precomputed` to `simulate_cube`.
+
+**Scope:** Only covers `direct` transform method with `angle='cos'` (the default for
+2D fitting). Does NOT cover `rotate` method (uses `scipy.ndimage.affine_transform`)
+or higher-order geometry components (use `angle='sin'`).
+
+**Files changed:**
+- `dysmalpy/fitting/jax_loss.py` — `include_geometry` param, `_precompute_sky_grids`,
+  updated `make_jaxns_log_likelihood`
+- `dysmalpy/models/model_set.py` — `sky_grids_precomputed` param in `simulate_cube`,
+  top-level `Geometry` import
+
+**Tracer flow:** When `_inject_tracers` stores a JAX tracer via
+`object.__setattr__(comp, '_param_value_inc', tracer)`:
+- `geom.inc.value` → `getattr(model, '_param_value_inc')` → returns tracer
+- `Geometry.evaluate(xsky, ysky, zsky, geom.inc.value, geom.pa.value, ...)` → tracer output
+- `v_sys + vrot * xgal/rgal * LOS_hat[1]` → tracer propagation through entire computation
+- `chi_sq = sum(((cube_model - cube_obs) / noise)^2)` → scalar tracer, fully differentiable
+
+---
+
 ## Development Pitfalls and Lessons Learned
 
 This section captures non-obvious bugs and design pitfalls encountered during
