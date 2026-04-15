@@ -31,7 +31,7 @@ PARAM_FILE = os.path.join(REPO_ROOT, 'examples', 'examples_param_files',
                            'fitting_2D_mpfit.params')
 
 
-def _setup_galaxy_and_fitter(num_live=50, max_eval=500, dlogZ=1.0):
+def _setup_galaxy_and_fitter(num_live=50, max_eval=None, dlogZ=0.1):
     """Create a Galaxy + JAXNSFitter from the 2D param file.
 
     Returns gal, fitter, output_options.
@@ -44,7 +44,8 @@ def _setup_galaxy_and_fitter(num_live=50, max_eval=500, dlogZ=1.0):
     params = read_fitting_params(fname=PARAM_FILE)
     params['fit_method'] = 'jaxns'
     params['num_live_points'] = num_live
-    params['max_num_likelihood_evaluations'] = max_eval
+    if max_eval is not None:
+        params['max_num_likelihood_evaluations'] = max_eval
     params['dlogZ'] = dlogZ
     params['verbose'] = False
     params['do_plotting'] = False
@@ -196,9 +197,9 @@ def test_jaxns_sampling_cpu():
     os.environ['JAX_PLATFORMS'] = 'cpu'
 
     gal, fitter, output_options = _setup_galaxy_and_fitter(
-        num_live=30, max_eval=300, dlogZ=2.0)
+        num_live=30, max_eval=None, dlogZ=0.1)
 
-    print("  Running JAXNS (CPU, quick)...")
+    print("  Running JAXNS (CPU, dlogZ=0.1 convergence)...")
     t0 = time.time()
     results = fitter.fit(gal, output_options)
     elapsed = time.time() - t0
@@ -246,9 +247,9 @@ def test_jaxns_sampling_gpu():
     os.environ['JAX_PLATFORMS'] = 'gpu'
 
     gal, fitter, output_options = _setup_galaxy_and_fitter(
-        num_live=30, max_eval=300, dlogZ=2.0)
+        num_live=30, max_eval=None, dlogZ=0.1)
 
-    print("  Running JAXNS (GPU, quick)...")
+    print("  Running JAXNS (GPU, dlogZ=0.1 convergence)...")
     t0 = time.time()
     results = fitter.fit(gal, output_options)
     elapsed = time.time() - t0
