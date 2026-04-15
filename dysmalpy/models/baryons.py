@@ -363,6 +363,10 @@ class NoordFlat(object):
         ----------
         `Noordermeer 2008 <https://ui.adsabs.harvard.edu/abs/2008MNRAS.385.1359N/abstract>`_
         """
+        r = jnp.asarray(r, dtype=jnp.float64)
+        r_eff = jnp.asarray(r_eff, dtype=jnp.float64)
+        mass = jnp.asarray(mass, dtype=jnp.float64)
+
         r_scaled = r / r_eff * self.N2008_Re
         vcirc_table = _interp1d_extrap(r_scaled, self._vcirc_R, self._vcirc_V)
         vcirc = vcirc_table * jnp.sqrt(mass / self.N2008_mass) * jnp.sqrt(self.N2008_Re / r_eff)
@@ -395,7 +399,7 @@ class NoordFlat(object):
         This function determines the spherical enclosed mass as a function of radius for
         a Sersic component with a total mass, `mass`, Sersic index, `n`, and
         an effective radius to scale height ratio, `invq`. This uses lookup tables
-        numerically calculated from the derivations provided in `Noordermeer 2008 <https://ui.adsabs.harvard.edu/abs/2008MNRAS.385.1359N/abstract>`_ 
+        numerically calculated from the derivations provided in `Noordermeer 2008 <https://ui.adsabs.harvard.edu/abs/2008MNRAS.385.1359N/abstract>`_
         (as extended in `Price et al. 2022 <https://ui.adsabs.harvard.edu/abs/2022A%26A...665A.159P/abstract>`_)
         which properly account for the thickness of the mass component.
 
@@ -404,6 +408,10 @@ class NoordFlat(object):
         `Noordermeer 2008 <https://ui.adsabs.harvard.edu/abs/2008MNRAS.385.1359N/abstract>`_
         `Price et al. 2022 <https://ui.adsabs.harvard.edu/abs/2022A%26A...665A.159P/abstract>`_
         """
+
+        r = jnp.asarray(r, dtype=jnp.float64)
+        r_eff = jnp.asarray(r_eff, dtype=jnp.float64)
+        mass = jnp.asarray(mass, dtype=jnp.float64)
 
         r_scaled = r / r_eff * self.N2008_Re
         menc_table = _interp1d_extrap(r_scaled, self._menc_R, self._menc_V)
