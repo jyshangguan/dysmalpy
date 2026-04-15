@@ -205,6 +205,14 @@ class ModelSet:
         #    higher order components in ModelSet.simulate_cube().
         self.__dict__ = state
 
+        # Rebind _model references after unpickling.
+        # DysmalParameter.__getstate__ sets _model = None (transient).
+        # Without rebinding, DysmalParameter.value returns self._default
+        # instead of the instance-level _param_value_* stored on the component.
+        for comp_name, comp in self.components.items():
+            for pname, pinst in getattr(comp, '_param_instances', {}).items():
+                object.__setattr__(pinst, '_model', comp)
+
         # Check param name order, in case it's changed since the object was pickled:
         for key in self.components.keys():
             if hasattr(self.components[key], '_param_metrics'):
