@@ -55,3 +55,8 @@ The MCMC fitting results are incorrect. You can see your demo report. The accept
 Now, check if you can run the demos with GPU instead of the CPU. Start with the MPFIT, MCMC, and JAXNS.
 
 Now, it seems that MCMC does not work well with multiple cores. Please check the code carefully and fix the problem. Work on the problem in `/home/shangguan/Softwares/my_modules/dysmalpy/dev`. Read the `/home/shangguan/Softwares/my_modules/dysmalpy/dev/develop_note.md` and `/home/shangguan/Softwares/my_modules/dysmalpy/dev/development_note.md` first. Write down your plan. Actually, merge everything in development_note.md and remove develop_note.md. Give me a plan first.
+
+
+# Fix the JAXNS problem
+
+Now, I want you to make JAXNS fitting really working. Please work in `/home/shangguan/Softwares/my_modules/dysmalpy/dev` and fully test and make sure that JAXNS works with the cpu and gpu mode (using single and multiple cores). Then, try to see how you can make the JAXNS fitting faster. Give me a plan first and write it down in the working path.

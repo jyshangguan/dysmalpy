@@ -91,3 +91,4 @@ dev/*npz
 demo/demo*output*
 PYTEST_OUTPUT
 *code-workspace
+test*
