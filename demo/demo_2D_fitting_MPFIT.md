@@ -120,12 +120,12 @@ gal, results = reload_all_fitting(
 Regenerate the best-fit comparison plot (data vs. model, with residuals):
 
 ```python
-results.plot_results(gal, f_plot_bestfit='demo/demo_2D_output/GS4_43501_mpfit_bestfit_demo.png',
+results.plot_results(gal, f_plot_bestfit='demo/demo_2D_output/GS4_43501_mpfit_bestfit_demo_OBS.png',
                      overwrite=True)
 ```
 
 ![Best-fit comparison: observed (left) vs. model (middle) vs. residual (right)
-velocity and dispersion maps](demo_2D_output/GS4_43501_mpfit_bestfit_demo_OBS.png)
+velocity and dispersion maps](figs/GS4_43501_mpfit_bestfit_demo_OBS.png)
 
 ### Results report
 

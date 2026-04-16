@@ -176,7 +176,7 @@ results.plot_results(
 #### Best-fit comparison
 
 ![Best-fit comparison: observed (left) vs. model (middle) vs. residual (right)
-velocity and dispersion maps](demo_2D_output_mcmc/GS4_43501_mcmc_bestfit_demo_OBS.png)
+velocity and dispersion maps](figs/GS4_43501_mcmc_bestfit_demo_OBS.png)
 
 #### Trace plot
 
@@ -184,7 +184,7 @@ Walker chains for each free parameter across sampling steps. With only 5 steps
 the chains show no mixing -- a production run would show well-mixed, stationary
 chains that explore the posterior.
 
-![MCMC trace plot](demo_2D_output_mcmc/GS4_43501_mcmc_trace_demo.png)
+![MCMC trace plot](figs/GS4_43501_mcmc_trace_demo.png)
 
 #### Corner plot
 
@@ -192,7 +192,7 @@ Pairwise posterior distributions for all free parameters. With too few samples t
 contours are poorly defined. A production run yields smooth, well-constrained
 marginalised posteriors.
 
-![MCMC corner plot](demo_2D_output_mcmc/GS4_43501_mcmc_param_corner_demo.png)
+![MCMC corner plot](figs/GS4_43501_mcmc_param_corner_demo.png)
 
 ### Results report
 

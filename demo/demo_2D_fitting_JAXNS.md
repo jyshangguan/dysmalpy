@@ -182,20 +182,20 @@ results.plot_results(
 Observed (left) vs. model (middle) vs. residual (right) velocity and dispersion maps:
 
 ![Best-fit comparison: observed (left) vs. model (middle) vs. residual (right)
-velocity and dispersion maps](demo_2D_output_jaxns/GS4_43501_jaxns_bestfit_demo_OBS.png)
+velocity and dispersion maps](figs/GS4_43501_jaxns_bestfit_demo_OBS.png)
 
 #### Corner plot
 
 Pairwise posterior distributions for all free parameters from the nested sampling run:
 
-![JAXNS corner plot](demo_2D_output_jaxns/GS4_43501_jaxns_param_corner_demo.png)
+![JAXNS corner plot](figs/GS4_43501_jaxns_param_corner_demo.png)
 
 #### Run diagnostics
 
 Nested sampling run diagnostics showing log-likelihood contour evolution and log-Z
 convergence:
 
-![JAXNS run diagnostics](demo_2D_output_jaxns/GS4_43501_jaxns_run_demo.png)
+![JAXNS run diagnostics](figs/GS4_43501_jaxns_run_demo.png)
 
 ### Results report
 
