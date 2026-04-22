@@ -1580,6 +1580,15 @@ class ModelSet:
 
                 sigmar_a = self.dispersions[obs.tracer](rgal_a * to_kpc)
 
+                # Apply dimming (luminosity -> flux conversion)
+                # Both ConstantDimming and CosmologicalDimming return a uniform
+                # scalar multiple (amp_lumtoflux), so sky coords are not needed.
+                if self.dimming is not None:
+                    flux_a *= self.dimming.amp_lumtoflux
+                # Note: extinction is NOT applied here because xsky/ysky/zsky
+                # are not available in the active-only path.  The default model
+                # has self.extinction = None, so this is safe for common usage.
+
                 # 4. Propagate using active-only function
                 cube_final += populate_cube_active(
                     jnp.asarray(flux_a), jnp.asarray(vobs_a),
