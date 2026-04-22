@@ -350,11 +350,11 @@ class JAXNSFitter(base.Fitter):
 
         # Lazy import jaxns (heavy imports)
         try:
-            from jaxns import NestedSampler, Model, Prior
-            from jaxns.nested_samplers.common.types import TerminationCondition
-            from jaxns.utils import summary as jaxns_summary
-            from jaxns.plotting import plot_diagnostics as jaxns_plot_diagnostics
-            from jaxns.plotting import plot_cornerplot as jaxns_plot_cornerplot
+            from jaxns import DefaultNestedSampler, Model, Prior
+            from jaxns.nested_sampler import TerminationCondition
+            from jaxns import summary as jaxns_summary
+            from jaxns import plot_diagnostics as jaxns_plot_diagnostics
+            from jaxns import plot_cornerplot as jaxns_plot_cornerplot
         except ImportError as e:
             raise ValueError(f"jaxns not available: {e}")
 
@@ -444,10 +444,9 @@ class JAXNSFitter(base.Fitter):
         # Create nested sampler
         ns_kwargs = dict(
             model=jaxns_model,
+            max_samples=self.max_samples if self.max_samples is not None else 1_000_000,
             difficult_model=self.difficult_model,
             parameter_estimation=self.parameter_estimation,
-            shell_fraction=self.shell_fraction,
-            gradient_guided=self.gradient_guided,
             init_efficiency_threshold=self.init_efficiency_threshold,
             verbose=self.verbose,
         )
@@ -462,7 +461,7 @@ class JAXNSFitter(base.Fitter):
         if self.c is not None:
             ns_kwargs['c'] = self.c
 
-        ns = NestedSampler(**ns_kwargs)
+        ns = DefaultNestedSampler(**ns_kwargs)
 
         logger.info(f"JAXNS: Running nested sampling...")
         t0 = time.time()
@@ -488,7 +487,8 @@ class JAXNSFitter(base.Fitter):
         # Save raw jaxns results
         if output_options.f_sampler_results is not None:
             if output_options.f_sampler_results.endswith('.json'):
-                ns.save_results(results, output_options.f_sampler_results)
+                from jaxns import save_results as jaxns_save_results
+                jaxns_save_results(results, output_options.f_sampler_results)
             else:
                 dump_pickle(results, filename=output_options.f_sampler_results,
                             overwrite=output_options.overwrite)
@@ -640,7 +640,7 @@ class JAXNSResults(base.BayesianFitResults, base.FitResults):
 
     def _setup_samples_blobs(self):
         """Extract samples from jaxns results into BayesianSampler format."""
-        from jaxns.utils import resample
+        from jaxns import resample
 
         results = self._jaxns_results
         num_samples = int(np.array(results.total_num_samples).item())
@@ -699,7 +699,7 @@ class JAXNSResults(base.BayesianFitResults, base.FitResults):
 
     def plot_corner(self, gal=None, fileout=None, overwrite=False):
         """Plot/replot the corner plot for JAXNS posterior."""
-        from jaxns.plotting import plot_cornerplot as jaxns_plot_cornerplot
+        from jaxns import plot_cornerplot as jaxns_plot_cornerplot
 
         if self._jaxns_results is None:
             raise ValueError("No JAXNS results available for corner plot")
@@ -712,7 +712,7 @@ class JAXNSResults(base.BayesianFitResults, base.FitResults):
 
     def plot_run(self, fileout=None, overwrite=False):
         """Plot/replot the run diagnostics for JAXNS."""
-        from jaxns.plotting import plot_diagnostics as jaxns_plot_diagnostics
+        from jaxns import plot_diagnostics as jaxns_plot_diagnostics
 
         if self._jaxns_results is None:
             raise ValueError("No JAXNS results available for run plot")
@@ -729,7 +729,7 @@ class JAXNSResults(base.BayesianFitResults, base.FitResults):
             raise ValueError("filename must be provided")
 
         if filename.endswith('.json'):
-            from jaxns.utils import load_results
+            from jaxns import load_results
             self._jaxns_results = load_results(filename)
         else:
             self._jaxns_results = load_pickle(filename)

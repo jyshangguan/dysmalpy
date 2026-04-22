@@ -29,7 +29,7 @@ import numpy as np
 import astropy.units as u
 import jax.numpy as jnp
 
-from .cube_processing import populate_cube_jax, populate_cube_jax_ais
+from .cube_processing import populate_cube_jax, populate_cube_jax_ais, populate_cube_active, _numpy_coord_transform
 
 
 __all__ = ['ModelSet']
@@ -1485,8 +1485,19 @@ class ModelSet:
                 # Regularly gridded in galaxy space
                 #   -- just use the number values from sky space for simplicity
                 if transform_method.lower().strip() == 'direct':
-                    xgal, ygal, zgal, xsky, ysky, zsky = _get_xyz_sky_gal(geom, sh,
+                    if zcalc_truncate and ai_precomputed is None:
+                        # Memory-efficient path: use numpy coordinate transform
+                        # to avoid allocating 603^3 JAX device arrays on GPU.
+                        xgal, ygal, zgal = _numpy_coord_transform(
+                            float(geom.inc), float(geom.pa),
+                            float(geom.xshift.value),
+                            float(geom.yshift.value),
+                            nx_sky_samp, ny_sky_samp, nz_sky_samp,
                             xcenter_samp, ycenter_samp, (nz_sky_samp - 1) / 2.)
+                        xsky = ysky = zsky = None  # not needed for direct method
+                    else:
+                        xgal, ygal, zgal, xsky, ysky, zsky = _get_xyz_sky_gal(geom, sh,
+                                xcenter_samp, ycenter_samp, (nz_sky_samp - 1) / 2.)
 
                 # Regularly gridded in sky space, will be rotated later
                 elif transform_method.lower().strip() == 'rotate':
@@ -1495,210 +1506,118 @@ class ModelSet:
 
 
             # The circular velocity at each position only depends on the radius
-            rgal = jnp.sqrt(xgal ** 2 + ygal ** 2)
+            # Determine whether to use the memory-efficient active-only path
+            _use_active_path = (
+                transform_method.lower().strip() == 'direct'
+                and zcalc_truncate
+                and ai_precomputed is None
+                and sky_grids_precomputed is None
+                and xsky is None  # set only by _numpy_coord_transform path
+            )
 
-            vrot = self.velocity_profile(rgal*to_kpc, tracer=obs.tracer)
-            # L.O.S. velocity is then just vrot*sin(i)*cos(theta) where theta
-            # is the position angle in the plane of the disk
-            # cos(theta) is just xgal/rgal
-            v_sys = geom.vel_shift.value  # systemic velocity
-            if transform_method.lower().strip() == 'direct':
-
-                # #########################
-                # # Get one of the mass components: all have the same vrot unit vector
-                # for cmp in self.mass_components:
-                #     if self.mass_components[cmp]:
-                #         mcomp = self.components[cmp]
-                #         break
+            if _use_active_path:
+                # ----------------------------------------------------------
+                # Memory-efficient path: numpy geometry + active-only evaluation
                 #
-                # vrot_LOS = geom.project_velocity_along_LOS(mcomp, vrot, xgal, ygal, zgal)
-                # vobs_mass = v_sys + vrot_LOS
-                # #########################
+                # xgal, ygal, zgal are plain numpy arrays from
+                # _numpy_coord_transform().  Compute active indices in numpy,
+                # extract active pixel coordinates, then evaluate model
+                # functions only for those pixels (small JAX arrays).
+                # ----------------------------------------------------------
 
-                #########################
-                # Avoid extra calculations to save memory:
-                # Use direct calculation for mass components: simple cylindrical LOS projection
+                # 1. Compute active indices (numpy-only)
+                ai = _make_cube_ai(self, xgal, ygal, zgal,
+                                   n_wholepix_z_min=n_wholepix_z_min,
+                                   pixscale=pixscale_samp, oversample=oversample,
+                                   dscale=dscale, maxr=maxr/2., maxr_y=maxr_y/2.)
+                ai_np = np.asarray(ai)
+
+                # 2. Extract active pixel coordinates (small numpy arrays)
+                xgal_a = xgal[ai_np[2], ai_np[1], ai_np[0]]
+                ygal_a = ygal[ai_np[2], ai_np[1], ai_np[0]]
+                zgal_a = zgal[ai_np[2], ai_np[1], ai_np[0]]
+                del xgal, ygal, zgal  # free ~5 GB numpy
+
+                # 3. Compute model quantities for active pixels only
+                xgal_a = jnp.asarray(xgal_a)
+                ygal_a = jnp.asarray(ygal_a)
+                zgal_a = jnp.asarray(zgal_a)
+
+                rgal_a = jnp.sqrt(xgal_a**2 + ygal_a**2)
+                vrot_a = self.velocity_profile(rgal_a * to_kpc, tracer=obs.tracer)
+
+                v_sys = geom.vel_shift.value
                 LOS_hat = geom.LOS_direction_emitframe()
-                vobs_mass = v_sys + vrot * xgal/rgal * LOS_hat[1]
-                # Excise rgal=0 values
-                vobs_mass = jnp.where(rgal > 0, vobs_mass, v_sys)
-                #########################
+                vobs_a = v_sys + vrot_a * xgal_a / jnp.where(rgal_a > 0, rgal_a, 1.) * LOS_hat[1]
+                vobs_a = jnp.where(rgal_a > 0, vobs_a, v_sys)
 
-                #######
-                # Higher order components: those that have same light distribution
+                # Higher order components (perturbations using same geometry)
                 for cmp_n in self.higher_order_components:
                     comp = self.higher_order_components[cmp_n]
                     cmps_hiord_geoms = list(self.higher_order_geometries.keys())
-
-                    ####
                     if (not comp._separate_light_profile) | \
                         (comp._higher_order_type.lower().strip() == 'perturbation'):
-                        if (comp.name not in cmps_hiord_geoms):
-                            ## Use general geometry:
-                            v_hiord = comp.velocity(xgal*to_kpc, ygal*to_kpc, zgal*to_kpc, self)
+                        if comp.name not in cmps_hiord_geoms:
+                            v_hiord = comp.velocity(xgal_a*to_kpc, ygal_a*to_kpc, zgal_a*to_kpc, self)
                             if comp._spatial_type != 'unresolved':
-                                v_hiord_LOS = geom.project_velocity_along_LOS(comp, v_hiord,
-                                                                                   xgal, ygal, zgal)
+                                v_hiord_LOS = geom.project_velocity_along_LOS(
+                                    comp, v_hiord, xgal_a, ygal_a, zgal_a)
                             else:
                                 v_hiord_LOS = v_hiord
+                            vobs_a += v_hiord_LOS
+
+                flux_a = jnp.zeros(xgal_a.shape)
+                tracer_lcomps = model_utils.get_light_components_by_tracer(self, obs.tracer)
+                for cmp in tracer_lcomps:
+                    if self.light_components[cmp]:
+                        lcomp = self.components[cmp]
+                        zscale_a = self.zprofile(zgal_a * to_kpc)
+                        if lcomp._axisymmetric:
+                            flux_a += lcomp.light_profile(rgal_a * to_kpc) * zscale_a
                         else:
-                            ## Own geometry:
-                            hiord_geom = self.higher_order_geometries[comp.name]
+                            flux_a += lcomp.light_profile(
+                                xgal_a*to_kpc, ygal_a*to_kpc, zgal_a*to_kpc) * zscale_a
 
-                            nz_sky_samp_hi, _, _ = _calculate_max_skyframe_extents(hiord_geom,
-                                        nx_sky_samp, ny_sky_samp, transform_method, angle='sin')
-                            sh_hi = (nz_sky_samp_hi, ny_sky_samp, nx_sky_samp)
+                sigmar_a = self.dispersions[obs.tracer](rgal_a * to_kpc)
 
-                            # Apply the geometric transformation to get higher order coordinates
-                            # Account for oversampling
-                            hiord_geom.xshift = hiord_geom.xshift.value * oversample
-                            hiord_geom.yshift = hiord_geom.yshift.value * oversample
-                            xhiord, yhiord, zhiord, xsky, ysky, zsky = _get_xyz_sky_gal(hiord_geom, sh_hi,
-                                            xcenter_samp, ycenter_samp, (nz_sky_samp_hi - 1) / 2.)
+                # 4. Propagate using active-only function
+                cube_final += populate_cube_active(
+                    jnp.asarray(flux_a), jnp.asarray(vobs_a),
+                    jnp.asarray(sigmar_a), jnp.asarray(vx),
+                    jnp.asarray(ai), ny_sky_samp, nx_sky_samp)
 
-                            # Profiles need positions in kpc
-                            v_hiord = comp.velocity(xhiord*to_kpc, yhiord*to_kpc, zhiord*to_kpc, self)
+            else:
+                # ----------------------------------------------------------
+                # Original path: full 3D arrays (JAX or precomputed grids)
+                # ----------------------------------------------------------
+                rgal = jnp.sqrt(xgal ** 2 + ygal ** 2)
 
-                            # LOS projection
-                            if comp._spatial_type != 'unresolved':
-                                v_hiord_LOS = hiord_geom.project_velocity_along_LOS(comp, v_hiord,
-                                                xhiord, yhiord, zhiord)
-                            else:
-                                v_hiord_LOS = v_hiord
+                vrot = self.velocity_profile(rgal*to_kpc, tracer=obs.tracer)
+                # L.O.S. velocity is then just vrot*sin(i)*cos(theta) where theta
+                # is the position angle in the plane of the disk
+                # cos(theta) is just xgal/rgal
+                v_sys = geom.vel_shift.value  # systemic velocity
+                if transform_method.lower().strip() == 'direct':
 
-                            # Remove the oversample from the geometry xyshift
-                            hiord_geom.xshift = hiord_geom.xshift.value / oversample
-                            hiord_geom.yshift = hiord_geom.yshift.value / oversample
-
-                            sh_hi = nz_sky_samp_hi = xhiord = yhiord = zhiord = None
-
-                        #   No systemic velocity here bc this is relative to
-                        #    the center of the galaxy at rest already
-                        vobs_mass += v_hiord_LOS
-                #######
-
-            elif transform_method.lower().strip() == 'rotate':
-                ####
-                logger.warning("Transform method 'rotate' has not been fully tested after changes!")
-                ####
-                vcirc_mass = vrot
-                vcirc_mass[rgal == 0] = 0.
-
-
-            # Calculate "flux" for each position
-            flux_mass = jnp.zeros(rgal.shape)
-
-            # self.light_components SHOULD NOT include
-            #    higher-order kin comps with own light profiles.
-
-            tracer_lcomps = model_utils.get_light_components_by_tracer(self, obs.tracer)
-            for cmp in tracer_lcomps:
-                if (self.light_components[cmp]):
-                    lcomp = self.components[cmp]
-                    zscale = self.zprofile(zgal*to_kpc)
-                    # Differentiate between axisymmetric and non-axisymmetric light components:
-                    if lcomp._axisymmetric:
-                        # Axisymmetric cases:
-                        flux_mass += lcomp.light_profile(rgal*to_kpc) * zscale
-                    else:
-                        # Non-axisymmetric cases:
-                        ## ASSUME IT'S ALL IN THE MIDPLANE, so also apply zscale
-                        flux_mass +=  lcomp.light_profile(xgal*to_kpc, ygal*to_kpc, zgal*to_kpc) * zscale
-
-
-            # Apply extinction if a component exists
-            if self.extinction is not None:
-                flux_mass *= self.extinction(xsky, ysky, zsky)
-
-            # Apply dimming if a component exists
-            if self.dimming is not None:
-                flux_mass *= self.dimming(xsky, ysky, zsky)
-
-            if transform_method.lower().strip() == 'direct':
-                sigmar = self.dispersions[obs.tracer](rgal*to_kpc)
-
-                # The final spectrum will be a flux weighted sum of Gaussians at each
-                # velocity along the line of sight.
-                # +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-                if zcalc_truncate:
-                    # Truncate in the z direction by flagging what pixels to include in propogation
-                    if ai_precomputed is not None:
-                        ai = ai_precomputed
-                    else:
-                        ai = _make_cube_ai(self, xgal, ygal, zgal, n_wholepix_z_min=n_wholepix_z_min,
-                            pixscale=pixscale_samp, oversample=oversample,
-                            dscale=dscale, maxr=maxr/2., maxr_y=maxr_y/2.)
-                    cube_final += populate_cube_jax_ais(
-                        jnp.asarray(flux_mass), jnp.asarray(vobs_mass),
-                        jnp.asarray(sigmar), jnp.asarray(vx), jnp.asarray(ai))
-                else:
-                    # Do complete cube propogation calculation
-                    cube_final += populate_cube_jax(
-                        jnp.asarray(flux_mass), jnp.asarray(vobs_mass),
-                        jnp.asarray(sigmar), jnp.asarray(vx))
-                # +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-
-            elif transform_method.lower().strip() == 'rotate':
-                ###################################
-                xgal_final, ygal_final, zgal_final, xsky_final, ysky_final, zsky_final = \
-                    _get_xyz_sky_gal_inverse(geom, sh, xcenter_samp, ycenter_samp,
-                                             (nz_sky_samp - 1) / 2.)
-
-                #rgal_final = np.sqrt(xgal_final ** 2 + ygal_final ** 2) * pixscale_samp / dscale
-                rgal_final = np.sqrt(xgal_final ** 2 + ygal_final ** 2)
-                #rgal_final_kpc = rgal_final * pixscale_samp / dscale
-
-                # +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-                # Simpler to just directly sample sigmar -- not as prone to sampling problems / often constant.
-                sigmar_transf = self.dispersion_profile(rgal_final*to_kpc)
-
-
-                if zcalc_truncate:
-                    # cos_inc = np.cos(geom.inc*np.pi/180.)
-                    # maxr_y_final = np.max(np.array([maxr*1.5, np.min(
-                    #     np.hstack([maxr*1.5/ cos_inc, maxr * 5.]))]))
-
-                    # Use the cos term, and the normal 'direct' maxr_y calculation
-                    _, _, maxr_y_final = _calculate_max_skyframe_extents(geom,
-                            nx_sky_samp, ny_sky_samp, 'direct', angle='cos')
-
-                    # ---------------------
-                    # GET TRIMMING FOR TRANSFORM:
-                    thick = self.zprofile.z_scalelength.value
-                    if not np.isfinite(thick):
-                        thick = 0.
-                    # Sample += 2 * scale length thickness
-                    # Modify: make sure there are at least 3 *whole* pixels sampled:
-                    zsize = np.max([  3.*oversample, int(np.floor( 4.*thick/pixscale_samp*dscale + 0.5 )) ])
-                    if ( (zsize%2) < 0.5 ): zsize += 1
-                    zarr = np.arange(nz_sky_samp) - (nz_sky_samp - 1) / 2.
-                    origpos_z = zarr - np.mean(zarr) + zsize/2.
-                    validz = np.where((origpos_z >= -0.5) & (origpos_z < zsize-0.5) )[0]
-                    # ---------------------
-
-                    # Rotate + transform cube from inclined to sky coordinates
-                    outsh = flux_mass.shape
-                    # Cube: z, y, x -- this is in GALAXY coords, so z trim is just in z coord.
-                    flux_mass_transf  = geom.transform_cube_affine(flux_mass[validz,:,:], output_shape=outsh)
-                    vcirc_mass_transf = geom.transform_cube_affine(vcirc_mass[validz,:,:], output_shape=outsh)
-
-                    # -----------------------
-                    # Perform LOS projection
                     # #########################
-                    # vobs_mass_transf_LOS = geom.project_velocity_along_LOS(mcomp, vcirc_mass_transf,
-                    #                         xgal_final, ygal_final, zgal_final)
-                    # vobs_mass_transf = v_sys + vobs_mass_transf_LOS
+                    # # Get one of the mass components: all have the same vrot unit vector
+                    # for cmp in self.mass_components:
+                    #     if self.mass_components[cmp]:
+                    #         mcomp = self.components[cmp]
+                    #         break
+                    #
+                    # vrot_LOS = geom.project_velocity_along_LOS(mcomp, vrot, xgal, ygal, zgal)
+                    # vobs_mass = v_sys + vrot_LOS
                     # #########################
 
                     #########################
                     # Avoid extra calculations to save memory:
                     # Use direct calculation for mass components: simple cylindrical LOS projection
                     LOS_hat = geom.LOS_direction_emitframe()
-                    vobs_mass_transf = v_sys + vcirc_mass_transf * xgal_final/rgal_final * LOS_hat[1]
+                    vobs_mass = v_sys + vrot * xgal/rgal * LOS_hat[1]
                     # Excise rgal=0 values
-                    vobs_mass_transf = jnp.where(rgal_final > 0, vobs_mass_transf, v_sys)
+                    vobs_mass = jnp.where(rgal > 0, vobs_mass, v_sys)
                     #########################
-                    # -----------------------
 
                     #######
                     # Higher order components: those that have same light distribution
@@ -1711,19 +1630,18 @@ class ModelSet:
                             (comp._higher_order_type.lower().strip() == 'perturbation'):
                             if (comp.name not in cmps_hiord_geoms):
                                 ## Use general geometry:
-                                v_hiord = comp.velocity(xgal_final*to_kpc, ygal_final*to_kpc,
-                                                    zgal_final*to_kpc, self)
+                                v_hiord = comp.velocity(xgal*to_kpc, ygal*to_kpc, zgal*to_kpc, self)
                                 if comp._spatial_type != 'unresolved':
                                     v_hiord_LOS = geom.project_velocity_along_LOS(comp, v_hiord,
-                                                                xgal_final, ygal_final, zgal_final)
+                                                                                       xgal, ygal, zgal)
                                 else:
                                     v_hiord_LOS = v_hiord
                             else:
-                                ## Own geometry, not perturbation:
+                                ## Own geometry:
                                 hiord_geom = self.higher_order_geometries[comp.name]
 
                                 nz_sky_samp_hi, _, _ = _calculate_max_skyframe_extents(hiord_geom,
-                                            nx_sky_samp, ny_sky_samp, 'direct', angle='sin')
+                                            nx_sky_samp, ny_sky_samp, transform_method, angle='sin')
                                 sh_hi = (nz_sky_samp_hi, ny_sky_samp, nx_sky_samp)
 
                                 # Apply the geometric transformation to get higher order coordinates
@@ -1734,7 +1652,7 @@ class ModelSet:
                                                 xcenter_samp, ycenter_samp, (nz_sky_samp_hi - 1) / 2.)
 
                                 # Profiles need positions in kpc
-                                v_hiord = comp.velocity(xhiord*to_kpc, yhiord*to_kpc, zhiord*to_kpc)
+                                v_hiord = comp.velocity(xhiord*to_kpc, yhiord*to_kpc, zhiord*to_kpc, self)
 
                                 # LOS projection
                                 if comp._spatial_type != 'unresolved':
@@ -1751,104 +1669,269 @@ class ModelSet:
 
                             #   No systemic velocity here bc this is relative to
                             #    the center of the galaxy at rest already
-                            vobs_mass_transf += v_hiord_LOS
+                            vobs_mass += v_hiord_LOS
                     #######
 
-                    #######
-                    # Truncate in the z direction by flagging what pixels to include in propogation
-                    if ai_sky_precomputed is not None:
-                        ai_sky = ai_sky_precomputed
-                    else:
-                        ai_sky = _make_cube_ai(self, xgal_final, ygal_final, zgal_final,
-                                n_wholepix_z_min=n_wholepix_z_min,
+                elif transform_method.lower().strip() == 'rotate':
+                    ####
+                    logger.warning("Transform method 'rotate' has not been fully tested after changes!")
+                    ####
+                    vcirc_mass = vrot
+                    vcirc_mass[rgal == 0] = 0.
+
+
+                # Calculate "flux" for each position
+                flux_mass = jnp.zeros(rgal.shape)
+
+                # self.light_components SHOULD NOT include
+                #    higher-order kin comps with own light profiles.
+
+                tracer_lcomps = model_utils.get_light_components_by_tracer(self, obs.tracer)
+                for cmp in tracer_lcomps:
+                    if (self.light_components[cmp]):
+                        lcomp = self.components[cmp]
+                        zscale = self.zprofile(zgal*to_kpc)
+                        # Differentiate between axisymmetric and non-axisymmetric light components:
+                        if lcomp._axisymmetric:
+                            # Axisymmetric cases:
+                            flux_mass += lcomp.light_profile(rgal*to_kpc) * zscale
+                        else:
+                            # Non-axisymmetric cases:
+                            ## ASSUME IT'S ALL IN THE MIDPLANE, so also apply zscale
+                            flux_mass +=  lcomp.light_profile(xgal*to_kpc, ygal*to_kpc, zgal*to_kpc) * zscale
+
+
+                # Apply extinction if a component exists
+                if self.extinction is not None:
+                    flux_mass *= self.extinction(xsky, ysky, zsky)
+
+                # Apply dimming if a component exists
+                if self.dimming is not None:
+                    flux_mass *= self.dimming(xsky, ysky, zsky)
+
+                if transform_method.lower().strip() == 'direct':
+                    sigmar = self.dispersions[obs.tracer](rgal*to_kpc)
+
+                    # The final spectrum will be a flux weighted sum of Gaussians at each
+                    # velocity along the line of sight.
+                    # +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+                    if zcalc_truncate:
+                        # Truncate in the z direction by flagging what pixels to include in propogation
+                        if ai_precomputed is not None:
+                            ai = ai_precomputed
+                        else:
+                            ai = _make_cube_ai(self, xgal, ygal, zgal, n_wholepix_z_min=n_wholepix_z_min,
                                 pixscale=pixscale_samp, oversample=oversample,
-                                dscale=dscale, maxr=maxr/2., maxr_y=maxr_y_final/2.)
-                    cube_final += populate_cube_jax_ais(
-                        jnp.asarray(flux_mass_transf), jnp.asarray(vobs_mass_transf),
-                        jnp.asarray(sigmar_transf), jnp.asarray(vx), jnp.asarray(ai_sky))
+                                dscale=dscale, maxr=maxr/2., maxr_y=maxr_y/2.)
+                        cube_final += populate_cube_jax_ais(
+                            jnp.asarray(flux_mass), jnp.asarray(vobs_mass),
+                            jnp.asarray(sigmar), jnp.asarray(vx), jnp.asarray(ai))
+                    else:
+                        # Do complete cube propogation calculation
+                        cube_final += populate_cube_jax(
+                            jnp.asarray(flux_mass), jnp.asarray(vobs_mass),
+                            jnp.asarray(sigmar), jnp.asarray(vx))
+                    # +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
-                else:
-                    # Rotate + transform cube from inclined to sky coordinates
-                    flux_mass_transf =  geom.transform_cube_affine(flux_mass)
-                    vcirc_mass_transf = geom.transform_cube_affine(vcirc_mass)
+                elif transform_method.lower().strip() == 'rotate':
+                    ###################################
+                    xgal_final, ygal_final, zgal_final, xsky_final, ysky_final, zsky_final = \
+                        _get_xyz_sky_gal_inverse(geom, sh, xcenter_samp, ycenter_samp,
+                                                 (nz_sky_samp - 1) / 2.)
 
-                    # -----------------------
-                    # Perform LOS projection
-                    # #########################
-                    # vobs_mass_transf_LOS = geom.project_velocity_along_LOS(mcomp, vcirc_mass_transf,
-                    #                         xgal_final, ygal_final, zgal_final)
-                    # vobs_mass_transf = v_sys + vobs_mass_transf_LOS
-                    # #########################
+                    #rgal_final = np.sqrt(xgal_final ** 2 + ygal_final ** 2) * pixscale_samp / dscale
+                    rgal_final = np.sqrt(xgal_final ** 2 + ygal_final ** 2)
+                    #rgal_final_kpc = rgal_final * pixscale_samp / dscale
 
-                    #########################
-                    # Avoid extra calculations to save memory:
-                    # Use direct calculation for mass components: simple cylindrical LOS projection
-                    LOS_hat = geom.LOS_direction_emitframe()
-                    vobs_mass_transf = v_sys + vcirc_mass_transf * xgal_final/rgal_final * LOS_hat[1]
-                    # Excise rgal=0 values
-                    vobs_mass_transf = jnp.where(rgal_final > 0, vobs_mass_transf, v_sys)
-                    #########################
-                    # -----------------------
+                    # +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+                    # Simpler to just directly sample sigmar -- not as prone to sampling problems / often constant.
+                    sigmar_transf = self.dispersion_profile(rgal_final*to_kpc)
 
-                    #######
-                    # Higher order components: those that have same light distribution
-                    for cmp_n in self.higher_order_components:
-                        comp = self.higher_order_components[cmp_n]
-                        cmps_hiord_geoms = list(self.higher_order_geometries.keys())
 
-                        ####
-                        if (not comp._separate_light_profile) | \
-                            (comp._higher_order_type.lower().strip() == 'perturbation'):
-                            if (comp.name not in cmps_hiord_geoms):
-                                ## Use general geometry:
-                                v_hiord = comp.velocity(xgal_final*to_kpc, ygal_final*to_kpc,
-                                                    zgal_final*to_kpc, self)
-                                if comp._spatial_type != 'unresolved':
-                                    v_hiord_LOS = geom.project_velocity_along_LOS(comp, v_hiord,
-                                                                xgal_final, ygal_final, zgal_final)
+                    if zcalc_truncate:
+                        # cos_inc = np.cos(geom.inc*np.pi/180.)
+                        # maxr_y_final = np.max(np.array([maxr*1.5, np.min(
+                        #     np.hstack([maxr*1.5/ cos_inc, maxr * 5.]))]))
+
+                        # Use the cos term, and the normal 'direct' maxr_y calculation
+                        _, _, maxr_y_final = _calculate_max_skyframe_extents(geom,
+                                nx_sky_samp, ny_sky_samp, 'direct', angle='cos')
+
+                        # ---------------------
+                        # GET TRIMMING FOR TRANSFORM:
+                        thick = self.zprofile.z_scalelength.value
+                        if not np.isfinite(thick):
+                            thick = 0.
+                        # Sample += 2 * scale length thickness
+                        # Modify: make sure there are at least 3 *whole* pixels sampled:
+                        zsize = np.max([  3.*oversample, int(np.floor( 4.*thick/pixscale_samp*dscale + 0.5 )) ])
+                        if ( (zsize%2) < 0.5 ): zsize += 1
+                        zarr = np.arange(nz_sky_samp) - (nz_sky_samp - 1) / 2.
+                        origpos_z = zarr - np.mean(zarr) + zsize/2.
+                        validz = np.where((origpos_z >= -0.5) & (origpos_z < zsize-0.5) )[0]
+                        # ---------------------
+
+                        # Rotate + transform cube from inclined to sky coordinates
+                        outsh = flux_mass.shape
+                        # Cube: z, y, x -- this is in GALAXY coords, so z trim is just in z coord.
+                        flux_mass_transf  = geom.transform_cube_affine(flux_mass[validz,:,:], output_shape=outsh)
+                        vcirc_mass_transf = geom.transform_cube_affine(vcirc_mass[validz,:,:], output_shape=outsh)
+
+                        # -----------------------
+                        # Perform LOS projection
+                        #########################
+                        # Avoid extra calculations to save memory:
+                        # Use direct calculation for mass components: simple cylindrical LOS projection
+                        LOS_hat = geom.LOS_direction_emitframe()
+                        vobs_mass_transf = v_sys + vcirc_mass_transf * xgal_final/rgal_final * LOS_hat[1]
+                        # Excise rgal=0 values
+                        vobs_mass_transf = jnp.where(rgal_final > 0, vobs_mass_transf, v_sys)
+                        #########################
+                        # -----------------------
+
+                        #######
+                        # Higher order components: those that have same light distribution
+                        for cmp_n in self.higher_order_components:
+                            comp = self.higher_order_components[cmp_n]
+                            cmps_hiord_geoms = list(self.higher_order_geometries.keys())
+
+                            ####
+                            if (not comp._separate_light_profile) | \
+                                (comp._higher_order_type.lower().strip() == 'perturbation'):
+                                if (comp.name not in cmps_hiord_geoms):
+                                    ## Use general geometry:
+                                    v_hiord = comp.velocity(xgal_final*to_kpc, ygal_final*to_kpc,
+                                                        zgal_final*to_kpc, self)
+                                    if comp._spatial_type != 'unresolved':
+                                        v_hiord_LOS = geom.project_velocity_along_LOS(comp, v_hiord,
+                                                                    xgal_final, ygal_final, zgal_final)
+                                    else:
+                                        v_hiord_LOS = v_hiord
                                 else:
-                                    v_hiord_LOS = v_hiord
-                            else:
-                                ## Own geometry, not perturbation:
-                                hiord_geom = self.higher_order_geometries[comp.name]
+                                    ## Own geometry, not perturbation:
+                                    hiord_geom = self.higher_order_geometries[comp.name]
 
-                                nz_sky_samp_hi, _, _ = _calculate_max_skyframe_extents(hiord_geom,
-                                            nx_sky_samp, ny_sky_samp, 'direct', angle='sin')
-                                sh_hi = (nz_sky_samp_hi, ny_sky_samp, nx_sky_samp)
+                                    nz_sky_samp_hi, _, _ = _calculate_max_skyframe_extents(hiord_geom,
+                                                nx_sky_samp, ny_sky_samp, 'direct', angle='sin')
+                                    sh_hi = (nz_sky_samp_hi, ny_sky_samp, nx_sky_samp)
 
-                                # Apply the geometric transformation to get higher order coordinates
-                                # Account for oversampling
-                                hiord_geom.xshift = hiord_geom.xshift.value * oversample
-                                hiord_geom.yshift = hiord_geom.yshift.value * oversample
-                                xhiord, yhiord, zhiord, xsky, ysky, zsky = _get_xyz_sky_gal(hiord_geom, sh_hi,
-                                                xcenter_samp, ycenter_samp, (nz_sky_samp_hi - 1) / 2.)
+                                    # Apply the geometric transformation to get higher order coordinates
+                                    # Account for oversampling
+                                    hiord_geom.xshift = hiord_geom.xshift.value * oversample
+                                    hiord_geom.yshift = hiord_geom.yshift.value * oversample
+                                    xhiord, yhiord, zhiord, xsky, ysky, zsky = _get_xyz_sky_gal(hiord_geom, sh_hi,
+                                                    xcenter_samp, ycenter_samp, (nz_sky_samp_hi - 1) / 2.)
 
-                                # Profiles need positions in kpc
-                                v_hiord = comp.velocity(xhiord*to_kpc, yhiord*to_kpc, zhiord*to_kpc)
+                                    # Profiles need positions in kpc
+                                    v_hiord = comp.velocity(xhiord*to_kpc, yhiord*to_kpc, zhiord*to_kpc)
 
-                                # LOS projection
-                                if comp._spatial_type != 'unresolved':
-                                    v_hiord_LOS = hiord_geom.project_velocity_along_LOS(comp, v_hiord,
-                                                    xhiord, yhiord, zhiord)
+                                    # LOS projection
+                                    if comp._spatial_type != 'unresolved':
+                                        v_hiord_LOS = hiord_geom.project_velocity_along_LOS(comp, v_hiord,
+                                                        xhiord, yhiord, zhiord)
+                                    else:
+                                        v_hiord_LOS = v_hiord
+
+                                    # Remove the oversample from the geometry xyshift
+                                    hiord_geom.xshift = hiord_geom.xshift.value / oversample
+                                    hiord_geom.yshift = hiord_geom.yshift.value / oversample
+
+                                    sh_hi = nz_sky_samp_hi = xhiord = yhiord = zhiord = None
+
+                                #   No systemic velocity here bc this is relative to
+                                #    the center of the galaxy at rest already
+                                vobs_mass_transf += v_hiord_LOS
+                        #######
+
+                        #######
+                        # Truncate in the z direction by flagging what pixels to include in propogation
+                        if ai_sky_precomputed is not None:
+                            ai_sky = ai_sky_precomputed
+                        else:
+                            ai_sky = _make_cube_ai(self, xgal_final, ygal_final, zgal_final,
+                                    n_wholepix_z_min=n_wholepix_z_min,
+                                    pixscale=pixscale_samp, oversample=oversample,
+                                    dscale=dscale, maxr=maxr/2., maxr_y=maxr_y_final/2.)
+                        cube_final += populate_cube_jax_ais(
+                            jnp.asarray(flux_mass_transf), jnp.asarray(vobs_mass_transf),
+                            jnp.asarray(sigmar_transf), jnp.asarray(vx), jnp.asarray(ai_sky))
+
+                    else:
+                        # Rotate + transform cube from inclined to sky coordinates
+                        flux_mass_transf =  geom.transform_cube_affine(flux_mass)
+                        vcirc_mass_transf = geom.transform_cube_affine(vcirc_mass)
+
+                        # -----------------------
+                        # Perform LOS projection
+                        #########################
+                        # Avoid extra calculations to save memory:
+                        # Use direct calculation for mass components: simple cylindrical LOS projection
+                        LOS_hat = geom.LOS_direction_emitframe()
+                        vobs_mass_transf = v_sys + vcirc_mass_transf * xgal_final/rgal_final * LOS_hat[1]
+                        # Excise rgal=0 values
+                        vobs_mass_transf = jnp.where(rgal_final > 0, vobs_mass_transf, v_sys)
+                        #########################
+                        # -----------------------
+
+                        #######
+                        # Higher order components: those that have same light distribution
+                        for cmp_n in self.higher_order_components:
+                            comp = self.higher_order_components[cmp_n]
+                            cmps_hiord_geoms = list(self.higher_order_geometries.keys())
+
+                            ####
+                            if (not comp._separate_light_profile) | \
+                                (comp._higher_order_type.lower().strip() == 'perturbation'):
+                                if (comp.name not in cmps_hiord_geoms):
+                                    ## Use general geometry:
+                                    v_hiord = comp.velocity(xgal_final*to_kpc, ygal_final*to_kpc,
+                                                        zgal_final*to_kpc, self)
+                                    if comp._spatial_type != 'unresolved':
+                                        v_hiord_LOS = geom.project_velocity_along_LOS(comp, v_hiord,
+                                                                    xgal_final, ygal_final, zgal_final)
+                                    else:
+                                        v_hiord_LOS = v_hiord
                                 else:
-                                    v_hiord_LOS = v_hiord
+                                    ## Own geometry, not perturbation:
+                                    hiord_geom = self.higher_order_geometries[comp.name]
 
-                                # Remove the oversample from the geometry xyshift
-                                hiord_geom.xshift = hiord_geom.xshift.value / oversample
-                                hiord_geom.yshift = hiord_geom.yshift.value / oversample
+                                    nz_sky_samp_hi, _, _ = _calculate_max_skyframe_extents(hiord_geom,
+                                                nx_sky_samp, ny_sky_samp, 'direct', angle='sin')
+                                    sh_hi = (nz_sky_samp_hi, ny_sky_samp, nx_sky_samp)
 
-                                sh_hi = nz_sky_samp_hi = xhiord = yhiord = zhiord = None
+                                    # Apply the geometric transformation to get higher order coordinates
+                                    # Account for oversampling
+                                    hiord_geom.xshift = hiord_geom.xshift.value * oversample
+                                    hiord_geom.yshift = hiord_geom.yshift.value * oversample
+                                    xhiord, yhiord, zhiord, xsky, ysky, zsky = _get_xyz_sky_gal(hiord_geom, sh_hi,
+                                                    xcenter_samp, ycenter_samp, (nz_sky_samp_hi - 1) / 2.)
 
-                            #   No systemic velocity here bc this is relative to
-                            #    the center of the galaxy at rest already
-                            vobs_mass_transf += v_hiord_LOS
-                    #######
+                                    # Profiles need positions in kpc
+                                    v_hiord = comp.velocity(xhiord*to_kpc, yhiord*to_kpc, zhiord*to_kpc)
 
-                    # Do complete cube propogation calculation
-                    cube_final += populate_cube_jax(
-                        jnp.asarray(flux_mass_transf), jnp.asarray(vobs_mass_transf),
-                        jnp.asarray(sigmar_transf), jnp.asarray(vx))
-                # +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+                                    # LOS projection
+                                    if comp._spatial_type != 'unresolved':
+                                        v_hiord_LOS = hiord_geom.project_velocity_along_LOS(comp, v_hiord,
+                                                        xhiord, yhiord, zhiord)
+                                    else:
+                                        v_hiord_LOS = v_hiord
+
+                                    # Remove the oversample from the geometry xyshift
+                                    hiord_geom.xshift = hiord_geom.xshift.value / oversample
+                                    hiord_geom.yshift = hiord_geom.yshift.value / oversample
+
+                                    sh_hi = nz_sky_samp_hi = xhiord = yhiord = zhiord = None
+
+                                #   No systemic velocity here bc this is relative to
+                                #    the center of the galaxy at rest already
+                                vobs_mass_transf += v_hiord_LOS
+                        #######
+
+                        # Do complete cube propogation calculation
+                        cube_final += populate_cube_jax(
+                            jnp.asarray(flux_mass_transf), jnp.asarray(vobs_mass_transf),
+                            jnp.asarray(sigmar_transf), jnp.asarray(vx))
+                    # +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
             # Remove the oversample from the geometry xyshift
             if sky_grids_precomputed is None:

@@ -40,10 +40,10 @@ def _precompute_cube_ai(model_set, obs, dscale):
 
     from dysmalpy.models.model_set import (
         _calculate_max_skyframe_extents,
-        _get_xyz_sky_gal,
         _get_xyz_sky_gal_inverse,
         _make_cube_ai,
     )
+    from dysmalpy.models.cube_processing import _numpy_coord_transform
 
     if not obs.mod_options.zcalc_truncate:
         return {'ai': None, 'ai_sky': None}
@@ -95,8 +95,12 @@ def _precompute_cube_ai(model_set, obs, dscale):
 
     try:
         if transform_method.lower().strip() == 'direct':
-            xgal, ygal, zgal, _, _, _ = _get_xyz_sky_gal(
-                geom, sh, xcenter_samp, ycenter_samp, (nz_sky_samp - 1) / 2.)
+            xgal, ygal, zgal = _numpy_coord_transform(
+                float(geom.inc), float(geom.pa),
+                float(geom.xshift.value),
+                float(geom.yshift.value),
+                nx_sky_samp, ny_sky_samp, nz_sky_samp,
+                xcenter_samp, ycenter_samp, (nz_sky_samp - 1) / 2.)
             ai = _make_cube_ai(model_set, xgal, ygal, zgal,
                                n_wholepix_z_min=n_wholepix_z_min,
                                pixscale=pixscale_samp, oversample=oversample,

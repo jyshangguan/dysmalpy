@@ -12,14 +12,15 @@ from __future__ import (absolute_import, division, print_function,
 
 import numpy as np
 import jax
+from functools import partial
 import jax.numpy as jnp
 
 from collections import OrderedDict
 
-__all__ = ['populate_cube_jax', 'populate_cube_jax_ais',
+__all__ = ['populate_cube_jax', 'populate_cube_jax_ais', 'populate_cube_active',
            '_simulate_cube_inner_direct', '_simulate_cube_inner_ais',
            '_make_cube_ai', '_get_xyz_sky_gal', '_get_xyz_sky_gal_inverse',
-           '_calculate_max_skyframe_extents']
+           '_calculate_max_skyframe_extents', '_numpy_coord_transform']
 
 
 # ===================================================================
@@ -346,3 +347,117 @@ def _calculate_max_skyframe_extents(geom, nx_sky_samp, ny_sky_samp,
         nz_sky_samp += 1
 
     return nz_sky_samp, maxr, maxr_y
+
+
+# ===================================================================
+# Helper: numpy coordinate transform (avoids JAX GPU allocation)
+# ===================================================================
+
+def _numpy_coord_transform(inc_deg, pa_deg, xshift, yshift,
+                           nx_sky, ny_sky, nz_sky,
+                           xc, yc, zc):
+    """Replicate ``Geometry.evaluate()`` using numpy (system RAM, not GPU).
+
+    Identical math to ``Geometry.evaluate`` but uses ``np.sin``/``np.cos``
+    so that the resulting coordinate grids are plain numpy arrays on the CPU.
+    This avoids JAX materialising large 3D arrays on the GPU, which causes
+    OOM for grids like 603^3.
+
+    Parameters
+    ----------
+    inc_deg, pa_deg : float
+        Inclination and position angle in degrees.
+    xshift, yshift : float
+        Pixel shifts (already scaled by oversample).
+    nx_sky, ny_sky, nz_sky : int
+        Grid dimensions.
+    xc, yc, zc : float
+        Centre pixel positions along each axis.
+
+    Returns
+    -------
+    xgal, ygal, zgal : np.ndarray
+        Galaxy-frame coordinate grids, shape ``(nz, ny, nx)``.
+    """
+    zsky = np.arange(nz_sky)[:, None, None] - zc
+    ysky = np.arange(ny_sky)[None, :, None] - yc
+    xsky = np.arange(nx_sky)[None, None, :] - xc
+
+    inc = np.pi / 180. * inc_deg
+    pa = np.pi / 180. * (pa_deg - 90.)
+
+    xsky_s = xsky - xshift
+    ysky_s = ysky - yshift
+
+    xtmp = xsky_s * np.cos(pa) + ysky_s * np.sin(pa)
+    ytmp = -xsky_s * np.sin(pa) + ysky_s * np.cos(pa)
+
+    xgal = xtmp
+    ygal = ytmp * np.cos(inc) - zsky * np.sin(inc)
+    zgal = ytmp * np.sin(inc) + zsky * np.cos(inc)
+
+    # Ensure all outputs have full (nz, ny, nx) shape for compatibility
+    # with _make_cube_ai which uses np.indices(xgal.shape)
+    out_shape = (nz_sky, ny_sky, nx_sky)
+    xgal = np.broadcast_to(xgal, out_shape)
+    ygal = np.broadcast_to(ygal, out_shape)
+    zgal = np.broadcast_to(zgal, out_shape)
+
+    # broadcast_to returns read-only views; make writable copies
+    # (needed by _make_cube_ai which calls .flatten())
+    xgal = np.array(xgal)
+    ygal = np.array(ygal)
+    zgal = np.array(zgal)
+
+    return xgal, ygal, zgal
+
+
+# ===================================================================
+# Helper: populate_cube_active  (1-D active-pixel propagation)
+# ===================================================================
+
+@partial(jax.jit, static_argnums=(5, 6))
+def populate_cube_active(flux_active, vel_active, sigma_active, vspec, ai,
+                         out_shape_0, out_shape_1):
+    """Sparse cube population from pre-extracted 1-D active pixel values.
+
+    Unlike ``populate_cube_jax_ais`` which takes full 3-D ``(nz, ny, nx)``
+    arrays and gathers the active pixels internally, this function receives
+    already-extracted 1-D arrays of shape ``(n_active,)``.  This avoids
+    allocating the full 3-D intermediate arrays on the JAX device, which is
+    critical when the grid is too large for GPU memory (e.g. 603^3).
+
+    Parameters
+    ----------
+    flux_active : jnp.ndarray, shape ``(n_active,)``
+        Flux at each active pixel.
+    vel_active : jnp.ndarray, shape ``(n_active,)``
+        LOS velocity at each active pixel.
+    sigma_active : jnp.ndarray, shape ``(n_active,)``
+        Velocity dispersion at each active pixel.
+    vspec : jnp.ndarray, shape ``(nspec,)``
+        Spectral channel velocities (km/s).
+    ai : jnp.ndarray, shape ``(3, n_active)``
+        Index array.  ``ai[0]`` = x, ``ai[1]`` = y, ``ai[2]`` = z.
+    out_shape_0 : int
+        ``ny`` spatial dimension of the output cube slice.
+    out_shape_1 : int
+        ``nx`` spatial dimension of the output cube slice.
+
+    Returns
+    -------
+    cube : jnp.ndarray, shape ``(nspec, ny, nx)``
+        Simulated data cube.
+    """
+    xi = ai[0]
+    yi = ai[1]
+
+    amp = flux_active / jnp.sqrt(2.0 * jnp.pi * sigma_active)
+
+    def _body(vs):
+        gaussian = amp * jnp.exp(-0.5 * ((vs - vel_active) / sigma_active) ** 2)
+        cube_slice = jnp.zeros((out_shape_0, out_shape_1))
+        cube_slice = cube_slice.at[yi, xi].add(gaussian)
+        return cube_slice
+
+    return jax.vmap(_body)(vspec)

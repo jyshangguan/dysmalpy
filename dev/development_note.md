@@ -743,3 +743,69 @@ the `ModelSet` level where all components are accessible.
 At unpickling time, `__setstate__` is called bottom-up (parameters before
 models).  The owning component (`_model`) hasn't been unpickled yet when
 `DysmalParameter.__setstate__` runs, so there's no way to set `_model` there.
+
+---
+
+### Phase 12: Fix OOM for Large Cubes via Active-Only Evaluation
+
+**Goal:** Prevent GPU OOM when generating large cubes (e.g. 201^3 output with
+`oversample=3` → 603^3 grid).
+
+**Root cause:** `_get_xyz_sky_gal()` calls `Geometry.evaluate()` which uses
+`jnp.sin`/`jnp.cos`, materialising the full 603^3 coordinate grid as JAX device
+arrays on the GPU (~1.75 GB each in float64).  All intermediate quantities
+(`rgal`, `vrot`, `vobs_mass`, `flux_mass`, `sigmar`) are also 603^3 JAX
+arrays.  Peak GPU usage ~18 GB exceeds the 4090's 24 GB (especially with other
+GPU processes).
+
+The `zcalc_truncate` option only optimises the propagation step (using
+`populate_cube_jax_ais` to skip empty pixels).  The full 603^3 coordinate grid
+and all intermediate arrays are still constructed before truncation.
+
+**Key insight:** For a thin disk (e.g. sigmaz=0.9 kpc), only ~9 out of 603
+z-slices are "active".  All the 603^3 intermediate JAX arrays are wasted.
+
+**Solution:** When `zcalc_truncate=True` and `sky_grids_precomputed is None`:
+
+1. **Numpy geometry transform** (`_numpy_coord_transform`): Replicates
+   `Geometry.evaluate()` using `np.sin`/`np.cos` instead of JAX.  Returns
+   numpy arrays in system RAM (~5.25 GB transient, freed after use).
+
+2. **Compute active indices in numpy** (`_make_cube_ai`): Already numpy-only.
+
+3. **Extract active pixel coordinates** (small numpy arrays, ~10k elements).
+
+4. **Compute model quantities for active pixels only** (small JAX arrays
+   that fit comfortably on GPU).
+
+5. **Propagate** using new `populate_cube_active()` function that takes
+   pre-extracted 1D active pixel values instead of full 3D arrays.
+
+**Memory comparison:**
+
+| Quantity | Before | After |
+|----------|--------|-------|
+| 3D coordinate arrays (JAX/GPU) | 6 x 1.75 GB | 0 |
+| 3D coordinate arrays (numpy/RAM) | 0 | 3 x 1.75 GB (freed after ai) |
+| rgal, vrot, vobs, flux, sigma (JAX/GPU) | 5 x 1.75 GB | 0 |
+| Active pixel arrays (JAX/GPU) | ~10k elements | ~10k elements |
+| Peak GPU memory | ~18 GB (OOM) | < 100 MB |
+| Peak system RAM | ~0 | ~10 GB (transient) |
+
+**Files changed:**
+
+| File | Change |
+|------|--------|
+| `dysmalpy/models/cube_processing.py` | Added `_numpy_coord_transform()`, `populate_cube_active()` |
+| `dysmalpy/models/model_set.py` | Modified `simulate_cube()` zcalc_truncate path to use active-only evaluation |
+| `dysmalpy/fitting/jax_loss.py` | `_precompute_cube_ai()` now uses `_numpy_coord_transform` instead of `_get_xyz_sky_gal` |
+
+**Backward compatibility:**
+
+- `zcalc_truncate=False` (default): no change
+- `sky_grids_precomputed` provided (JAXNS): no change
+- `zcalc_truncate=True` + no precomputed grids: uses new numpy path —
+  physics-identical results (same geometry transform math, just numpy vs JAX)
+
+**Verification:** Run `build_cube` with demo config (Layer A) — should complete
+without OOM.  Peak GPU memory should be low (< 500 MB).

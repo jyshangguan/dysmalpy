@@ -64,12 +64,6 @@ def hyp2f1(a, b, c, z):
     For z close to 1 (|w| close to 1), uses a secondary transformation via
     the quadratic relation to improve convergence.
     """
-    # For |z| < 1, try JAX's built-in first (more accurate)
-    jax_builtin = jax.scipy.special.hyp2f1(a, b, c, z)
-    jax_ok = jnp.isfinite(jax_builtin) & (jnp.abs(z) < 1.0)
-
-    use_transform = jnp.abs(z) >= 1.0
-
     # Primary transformation: w = z/(z-1), b -> c-b
     w = z / (z - 1.0)
     prefactor = jnp.power(1.0 - z, -a)
@@ -80,8 +74,14 @@ def hyp2f1(a, b, c, z):
 
     custom_result = prefactor * result_w
 
-    # Use JAX built-in when available and finite, otherwise custom
-    return jnp.where(jax_ok, jax_builtin, custom_result)
+    # For |z| < 1, try JAX's built-in first (more accurate) if available
+    _has_builtin = hasattr(jax.scipy.special, 'hyp2f1')
+    if _has_builtin:
+        jax_builtin = jax.scipy.special.hyp2f1(a, b, c, z)
+        jax_ok = jnp.isfinite(jax_builtin) & (jnp.abs(z) < 1.0)
+        return jnp.where(jax_ok, jax_builtin, custom_result)
+
+    return custom_result
 
 
 @hyp2f1.defjvp
