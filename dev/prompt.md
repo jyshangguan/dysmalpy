@@ -69,7 +69,9 @@ Write the Claude.md in dysmalpy and add skills. The package is quite complicated
 
 # Split the original dysmalpy to another branch
 
-I split the original dysmalpy into a `dysmalpy_origin` branch and merge dev_jax into the main branch so we can use the main branch for the JAX GPU fitting. Update the claude.md and skills to make sure you can easily find the original package for reference.
+I have splitted the original dysmalpy into a `dysmalpy_origin` branch and merged dev_jax into the main branch so we can use the main branch for the JAX GPU fitting. Update the claude.md and skills to make sure you can easily find the original package for reference.
+
+In the development workflow of CLAUDE.md, add that "when we suspect the model fitting does not work properly, we should use the original dysmalpy model (in the `dysmalpy_origin` branch) to do detailed comparison. End-to-end comparison is usually efficient to identify the problem. Also emphasize that use the `dev_jax` branch to develop new features and leave the main branch only for stable versions.
 
 
 # Unit test
