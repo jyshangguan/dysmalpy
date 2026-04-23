@@ -161,11 +161,31 @@ Additional important gotchas:
 
 ## Development Workflow
 
+**Branch discipline:**
+- **`dev_jax`** — develop new features and make changes here.  Only merge into
+  `main` once the feature is tested and stable.
+- **`main`** — stable versions only.  Do not commit work-in-progress directly.
+
 The `dev/` folder contains development notes.  Update them during each development session:
 
 - **`dev/problem.md`** — catalogue of known problems and pitfalls.  Read before debugging.
 - **`dev/develop_log.md`** — log of all changes, phase-by-phase.
 - **`dev/prompt.md`** — development prompts (if present).
+
+**End-to-end comparison with the original code:**
+When model fitting produces unexpected results (wrong chi-squared, bad parameter
+recovery, numerical artefacts), use the original Cython implementation on the
+`dysmalpy_origin` branch for a detailed comparison.  End-to-end comparison
+(run both branches with identical parameters, then compare output cubes, moment
+maps, and chi-squared values) is usually the most efficient way to isolate whether
+the issue is in the model computation, the fitting pipeline, or the observation
+simulation.
+
+```bash
+# Diff output cubes between branches (after running both)
+git show dysmalpy_origin:path/to/reference_cube.py  # inspect original implementation
+git diff main..dysmalpy_origin -- dysmalpy/models/halos.py  # compare a specific file
+```
 
 ## Testing
 
