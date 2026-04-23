@@ -1,4 +1,10 @@
-# Copyright (c) MPE/IR-Submm Group. See LICENSE.rst for license information. 
+# Copyright (c) MPE/IR-Submm Group. See LICENSE.rst for license information.
+
+# Enable float64 in JAX before any JAX import.  Must be set before the first
+# ``import jax`` / ``import jax.numpy`` call, otherwise the default float32
+# dtype is locked in and cannot be changed at runtime.
+import os
+os.environ.setdefault('JAX_ENABLE_X64', '1')
 
 import dysmalpy.models
 import dysmalpy.galaxy
