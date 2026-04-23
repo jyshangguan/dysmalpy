@@ -5,16 +5,43 @@
 dysmalpy builds and fits multi-component galaxy dynamical models to observed
 kinematic data (rotation curves, velocity fields, IFU datacubes).  It supports
 1D, 2D, and 3D fitting with multiple backends (MPFIT, MCMC, nested sampling,
-JAX-Adam, JAXNS).  The `dev_jax` branch replaces the original Cython backend
-with JAX-accelerated computation for GPU speedup.
+JAX-Adam, JAXNS).  The current `main` branch uses JAX-accelerated computation
+(replacing the original Cython backend) for GPU speedup.
 
 ## Branch
 
-- **`dev_jax`** — active development branch; JAX-accelerated, no Cython dependency
-- **`main`** — original release; Cython `cutils.pyx` backend, astropy.modeling
+- **`main`** — current development branch; JAX-accelerated, no Cython dependency
+- **`dysmalpy_origin`** — original upstream release; Cython `cutils.pyx` backend,
+  astropy.modeling-based parameters.  Use `git show dysmalpy_origin:<path>` to
+  inspect the original implementation of any file for reference.
+- **`dev_jax`** — historical branch (superseded by `main` after merge)
 
-The two branches are **not pickle-compatible**.  Use JSON params for cross-branch
-data transfer (see `dev/problem.md` §5).
+The two main branches are **not pickle-compatible**.  Use JSON params for
+cross-branch data transfer (see `dev/problem.md` §5).
+
+### Referencing the original code
+
+To compare with the original Cython/astropy implementation, checkout or inspect
+the `dysmalpy_origin` branch without switching:
+
+```bash
+# View a file from the original branch
+git show dysmalpy_origin:dysmalpy/models/base.py
+
+# Diff a file between branches
+git diff main..dysmalpy_origin -- dysmalpy/models/halos.py
+
+# Checkout the original branch temporarily
+git stash && git checkout dysmalpy_origin && git checkout main && git stash pop
+```
+
+Key differences from the original (`dysmalpy_origin`) to current (`main`):
+- `parameters.py`: standalone `DysmalParameter` descriptor (replaces astropy.modeling.Parameter)
+- `models/base.py`: `_DysmalModelMeta` metaclass (replaces astropy.modeling.Model)
+- `models/cube_processing.py`: JAX cube population (replaces Cython `cutils.pyx`)
+- `convolution.py`: JAX FFT convolution (new, no original equivalent)
+- `special/`: JAX-traceable special functions (replaces scipy.special calls)
+- No `cutils.pyx` / `cutils.c` files on `main`
 
 ## Module Map
 
@@ -118,8 +145,9 @@ See `dev/problem.md` for the full catalogue.  The top 5:
    import time.  Python's default `fork` copies this state, causing deadlocks.
    Use `multiprocess.get_context('forkserver').Pool(nCPUs)`.
 
-5. **Pickle cross-branch incompatibility** — Pickles saved on `dev_jax` cannot be
-   loaded on `main` and vice versa.  Use JSON params for cross-branch transfer.
+5. **Pickle cross-branch incompatibility** — Pickles saved on `main` (JAX) cannot be
+   loaded on `dysmalpy_origin` (Cython) and vice versa.  Use JSON params for
+   cross-branch transfer.
 
 Additional important gotchas:
 
@@ -156,5 +184,5 @@ Test files:
   model computations, convolution, full pipeline integration)
 - `tests/test_models.py` — 27 existing model tests (numpy 2.x compat fixes)
 
-All 101 tests pass on the `dev_jax` branch.  JAX (dev_jax) and Cython (main) produce
+All 101 tests pass.  JAX (`main`) and Cython (`dysmalpy_origin`) produce
 numerically identical cubes (max diff = 8.6e-16).
