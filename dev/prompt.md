@@ -60,3 +60,18 @@ Now, it seems that MCMC does not work well with multiple cores. Please check the
 # Fix the JAXNS problem
 
 Now, I want you to make JAXNS fitting really working. Please work in `/home/shangguan/Softwares/my_modules/dysmalpy/dev` and fully test and make sure that JAXNS works with the cpu and gpu mode (using single and multiple cores). Then, try to see how you can make the JAXNS fitting faster. Give me a plan first and write it down in the working path.
+
+
+# Add Claude.md and skills
+
+Write the Claude.md in dysmalpy and add skills. The package is quite complicated so please break down the functions and features in the skills in different files. Think carefully and make a plan.
+
+
+# Split the original dysmalpy to another branch
+
+I split the original dysmalpy into a `dysmalpy_origin` branch and merge dev_jax into the main branch so we can use the main branch for the JAX GPU fitting. Update the claude.md and skills to make sure you can easily find the original package for reference.
+
+
+# Unit test
+
+Evaluate if you need to update the unit tests so that you can test the problems with the new code. 
