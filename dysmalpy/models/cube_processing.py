@@ -222,22 +222,29 @@ def _make_cube_ai(model, xgal, ygal, zgal, n_wholepix_z_min=3,
     if (zsize % 2) < 0.5:
         zsize += 1
 
-    zi, yi, xi = np.indices(xgal.shape)
-    full_ai = np.vstack([xi.flatten(), yi.flatten(), zi.flatten()])
+    nz, ny, nx = xgal.shape
 
-    origpos = np.vstack([
-        xgal.flatten() - np.mean(xgal.flatten()) + xsize / 2.0,
-        ygal.flatten() - np.mean(ygal.flatten()) + ysize / 2.0,
-        zgal.flatten() - np.mean(zgal.flatten()) + zsize / 2.0,
-    ])
+    xflat = xgal.ravel()
+    yflat = ygal.ravel()
+    zflat = zgal.ravel()
 
-    validpts = np.where(
-        (origpos[0, :] >= 0.0) & (origpos[0, :] <= xsize) &
-        (origpos[1, :] >= 0.0) & (origpos[1, :] <= ysize) &
-        (origpos[2, :] >= 0.0) & (origpos[2, :] <= zsize)
-    )[0]
+    origpos_x = xflat - np.mean(xflat) + xsize / 2.0
+    origpos_y = yflat - np.mean(yflat) + ysize / 2.0
+    origpos_z = zflat - np.mean(zflat) + zsize / 2.0
 
-    ai = full_ai[:, validpts]
+    valid = ((origpos_x >= 0.0) & (origpos_x <= xsize) &
+             (origpos_y >= 0.0) & (origpos_y <= ysize) &
+             (origpos_z >= 0.0) & (origpos_z <= zsize))
+
+    validpts = np.flatnonzero(valid)
+    ai_x = validpts % nx
+    ai_y = (validpts // nx) % ny
+    ai_z = validpts // (nx * ny)
+
+    ai = np.vstack([ai_x, ai_y, ai_z])
+
+    del origpos_x, origpos_y, origpos_z, valid
+
     return ai
 
 
