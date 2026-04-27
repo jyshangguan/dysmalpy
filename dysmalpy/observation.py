@@ -461,7 +461,7 @@ class Observation:
                                     cube_model=cube_data,
                                     spec_arr=spec_arr,
                                     mask=this_fitting_mask,
-                                    method='hybrid'
+                                    method='closed_form'  # Fast, accurate, practical for JAXNS
                                 )
                                 flux = flux_jax
                                 vel = vel_jax
