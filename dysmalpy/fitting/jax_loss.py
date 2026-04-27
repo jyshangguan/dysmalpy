@@ -17,6 +17,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+# JAX Gaussian fitting for moment_calc=False support
+try:
+    from dysmalpy.fitting.jax_gaussian_fitting import fit_gaussian_cube_jax
+    _JAX_GAUSSIAN_AVAILABLE = True
+except ImportError:
+    _JAX_GAUSSIAN_AVAILABLE = False
+
 
 __all__ = ['make_jax_loss_function', 'make_jax_log_prob_function',
            'make_jax_loss_function_1d', 'make_jaxns_log_likelihood']
@@ -748,7 +755,7 @@ def make_jaxns_log_likelihood(gal, fitter):
 
         elif ndim == 2:
             # 2D map fitting: extract velocity/dispersion maps from cube
-            # using moment extraction (JAX-traceable alternative to Gaussian fitting)
+            # using moment extraction or Gaussian fitting (JAX-traceable)
             vel_obs = jnp.asarray(np.asarray(
                 obs.data.data['velocity'], dtype=np.float64))
             vel_err = jnp.asarray(np.asarray(
@@ -765,6 +772,13 @@ def make_jaxns_log_likelihood(gal, fitter):
             obs_entry['vel_err'] = vel_err
             obs_entry['mask'] = jnp.asarray(msk)
             obs_entry['fit_velocity'] = obs.fit_options.fit_velocity
+
+            # Check if we should use moment extraction or Gaussian fitting
+            # moment=True: use moments, moment=False: use Gaussian fitting
+            moment_calc = True
+            if hasattr(obs.instrument, 'moment'):
+                moment_calc = obs.instrument.moment
+            obs_entry['moment_calc'] = moment_calc
 
             if obs.fit_options.fit_dispersion:
                 disp_obs = jnp.asarray(np.asarray(
@@ -853,25 +867,37 @@ def make_jaxns_log_likelihood(gal, fitter):
                 total_llike += -0.5 * chi_sq * od['invnu'] * od['weight']
 
             elif od['ndim'] == 2:
-                # Extract 2D velocity/dispersion maps from cube via moment extraction
+                # Extract 2D velocity/dispersion maps from cube
+                # Use moment extraction or Gaussian fitting depending on moment_calc parameter
                 spec_arr = od['spec_arr']
                 delspec = od['delspec']
                 msk = od['mask']
 
-                # flux map: (ny, nx)
-                flux_map = jnp.nansum(cube_model, axis=0) * delspec
+                # Check if we should use Gaussian fitting (moment_calc=False)
+                if not od.get('moment_calc', True) and _JAX_GAUSSIAN_AVAILABLE:
+                    # Use JAX Gaussian fitting for more accurate parameter extraction
+                    flux_map, vel_map, disp_map = fit_gaussian_cube_jax(
+                        cube_model=cube_model,
+                        spec_arr=spec_arr,
+                        mask=(msk == 0),  # JAX uses True for valid pixels
+                        method='hybrid'
+                    )
+                else:
+                    # Use moment extraction (faster, JAX-traceable)
+                    # flux map: (ny, nx)
+                    flux_map = jnp.nansum(cube_model, axis=0) * delspec
 
-                # velocity map: (ny, nx)
-                vel_map = (jnp.nansum(
-                    cube_model * spec_arr[:, None, None], axis=0) * delspec
-                    / jnp.where(flux_map != 0, flux_map, 1.))
+                    # velocity map: (ny, nx)
+                    vel_map = (jnp.nansum(
+                        cube_model * spec_arr[:, None, None], axis=0) * delspec
+                        / jnp.where(flux_map != 0, flux_map, 1.))
 
-                # dispersion map: (ny, nx)
-                disp_map = jnp.sqrt(jnp.abs(
-                    jnp.nansum(
-                        cube_model * (spec_arr[:, None, None] - vel_map[None, :, :]) ** 2,
-                        axis=0) * delspec
-                    / jnp.where(flux_map != 0, flux_map, 1.)))
+                    # dispersion map: (ny, nx)
+                    disp_map = jnp.sqrt(jnp.abs(
+                        jnp.nansum(
+                            cube_model * (spec_arr[:, None, None] - vel_map[None, :, :]) ** 2,
+                            axis=0) * delspec
+                        / jnp.where(flux_map != 0, flux_map, 1.)))
 
                 chi_sq = jnp.array(0.0)
 

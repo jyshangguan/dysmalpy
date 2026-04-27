@@ -262,7 +262,7 @@ def setup_observation_options(obs, params=None, extra=None):
     # mod_options:
     keys_set = ['xcenter', 'ycenter', 'oversample', 'oversize',
                 'transform_method', 'zcalc_truncate', 'n_wholepix_z_min',
-                'gauss_extract_with_c']
+                'gauss_extract_with_c', 'gauss_extract_with_jax']
     for key in keys_set:
         if (key+extra in params.keys()):
             obs.mod_options.__dict__[key] = params[key+extra]

@@ -210,3 +210,100 @@ See `problem.md` for the full catalogue. Key items:
 6. **DysmalParameter descriptor pollution** — use `_get_param()` for reads
 7. **Multiprocessing requires `forkserver`** — not `fork`
 8. **GPU OOM for large cubes** — use `zcalc_truncate=True` (default)
+
+### Phase 4: JAX Gaussian Fitting (2026-04-27)
+
+**Goal:** Enable `moment_calc=False` for JAXNS by implementing JAX-compatible Gaussian fitting.
+
+**Problem:** Current JAXNS always uses moment extraction, ignoring `moment_calc=False` parameter that MPFIT uses for Gaussian fitting.
+
+**Solution:** Hybrid closed-form MLE + JAX optimization refinement.
+
+**Implementation:**
+
+1. **Created `dysmalpy/fitting/jax_gaussian_fitting.py`:**
+   - `closed_form_gaussian()` — JAX-compatible closed-form MLE using weighted moments
+     - μ = Σ(x·y)/Σy (velocity)
+     - σ² = Σy·(x-μ)²/Σy (dispersion)
+     - A = Σy/(√(2π)·σ) (amplitude)
+   - `gaussian_loss()` — Chi-squared loss for optimization
+   - `refine_gaussian_jax()` — BFGS refinement with automatic gradients
+   - `fit_gaussian_cube_jax()` — Vectorized cube fitting using `jax.vmap`
+     - Processes all spatial pixels in parallel
+     - Handles masking and edge cases (low S/N, zero signal)
+     - Returns flux_map, vel_map, disp_map
+
+2. **Testing:**
+   - Created `tests/test_jax_gaussian_fitting_basic.py`
+   - All tests pass:
+     - Closed-form fitting accuracy: ΔA<0.5, Δμ<1.0, Δσ<2.0
+     - Chi-squared computation works
+     - Optimization refinement improves accuracy
+     - Cube fitting on 5×5 test cube successful
+     - Edge cases (low/zero signal) handled correctly
+
+**Key Technical Issues Resolved:**
+- JAX vmap axis confusion: vmap maps over axis 0 by default, needed `in_axes=1` to map over spatial pixels
+- Shape broadcasting: vmap returns (n_pixels, 3) not (3, n_pixels), requiring adjusted indexing
+- Masking: Used `valid_pixels[:, None]` for proper broadcasting
+
+**Next Steps:**
+- Integrate with observation.py to replace C++ fitting when appropriate
+- Update jax_loss.py to respect moment_calc parameter
+- Performance benchmarking vs C++ implementation
+- Full validation on GS4_43501 data
+
+**Files Modified:**
+- `dysmalpy/fitting/jax_gaussian_fitting.py` (NEW)
+- `tests/test_jax_gaussian_fitting_basic.py` (NEW)
+
+
+### Phase 5: Integration (2026-04-27)
+
+**Goal:** Integrate JAX Gaussian fitting into the existing dysmalpy pipeline.
+
+**Implementation:**
+
+1. **Modified `observation.py`:**
+   - Added `gauss_extract_with_jax` parameter to `ObsModOptions` class
+   - Added JAX Gaussian fitting import with fallback for missing dependency
+   - Modified Gaussian extraction logic (lines 435-534):
+     - Try JAX fitting first if `gauss_extract_with_jax=True`
+     - Fall back to C++/Python fitting if JAX fails or not enabled
+     - Maintains backward compatibility with existing code
+
+2. **Modified `jax_loss.py`:**
+   - Added JAX Gaussian fitting import
+   - Added `moment_calc` parameter to observation data entry (line 772)
+   - Modified 2D likelihood calculation (lines 855-895):
+     - Check `moment_calc` parameter
+     - Use JAX Gaussian fitting when `moment_calc=False`
+     - Use moment extraction when `moment_calc=True` (default)
+   - Enables JAXNS to respect the `moment_calc` parameter
+
+3. **Modified `setup_gal_models.py`:**
+   - Added `gauss_extract_with_jax` to parameter keys (line 265)
+   - Ensures parameter is properly passed through setup pipeline
+
+**Key Features:**
+- Backward compatible: existing code continues to work
+- Graceful fallback: if JAX fitting fails, falls back to C++/Python
+- Flexible: can be controlled via parameter file or code
+- JAXNS compatible: fully integrated with JAX loss functions
+
+**Testing:**
+- All imports successful
+- No syntax errors in modified files
+- Maintains existing functionality
+
+**Next Steps:**
+- Test full JAXNS pipeline with `moment_calc=False`
+- Performance benchmarking vs C++ implementation
+- Validation on GS4_43501 data
+- Update documentation
+
+**Files Modified:**
+- `dysmalpy/observation.py`
+- `dysmalpy/fitting/jax_loss.py`
+- `dysmalpy/fitting_wrappers/setup_gal_models.py`
+

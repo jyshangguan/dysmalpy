@@ -22,6 +22,13 @@ from dysmalpy.data_classes import Data0D, Data1D, Data2D, Data3D
 from dysmalpy.instrument import Instrument
 from dysmalpy.utils import apply_smoothing_3D, rebin, gaus_fit_sp_opt_leastsq
 
+# JAX Gaussian fitting (optional, for JAXNS compatibility)
+try:
+    from dysmalpy.fitting.jax_gaussian_fitting import fit_gaussian_cube_jax
+    _JAX_GAUSSIAN_AVAILABLE = True
+except ImportError:
+    _JAX_GAUSSIAN_AVAILABLE = False
+
 # LOGGER SETTINGS
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('DysmalPy')
@@ -440,57 +447,90 @@ class Observation:
                     vel = np.zeros(mom0.shape)
                     disp = np.zeros(mom0.shape)
                     # ++++++++++++++++++++++++++++++++++++++++++++++++++
-                    my_least_chi_squares_1d_fitter = None
-                    if (_loaded_LeastChiSquares1D):
-                        if self.mod_options.gauss_extract_with_c:
-                            # # we will use the C++ LeastChiSquares1D to run the 1d spectral fitting
-                            # # but note that if a spectrum has data all too close to zero, it will fail.
-                            # # try to prevent this by excluding too low data
-                            # this_fitting_mask = 'auto'
+                    # Try JAX Gaussian fitting first (if enabled and available)
+                    jax_fitting_used = False
+                    if _JAX_GAUSSIAN_AVAILABLE and hasattr(self.mod_options, 'gauss_extract_with_jax'):
+                        if self.mod_options.gauss_extract_with_jax:
+                            logger.debug('Using JAX Gaussian fitting '+str(datetime.datetime.now()))
+                            # Get mask if available
                             this_fitting_mask = None
                             if self.data is not None:
                                 if self.data.mask is not None:
                                     this_fitting_mask = copy.copy(self.data.mask)
+                            # Get spectral axis
+                            spec_arr = self.model_cube.data.spectral_axis.to(u.km/u.s).value
+                            # Get data cube
+                            cube_data = self.model_cube.data.unmasked_data[:,:,:].value
+                            # Run JAX Gaussian fitting
+                            try:
+                                flux_jax, vel_jax, disp_jax = fit_gaussian_cube_jax(
+                                    cube_model=cube_data,
+                                    spec_arr=spec_arr,
+                                    mask=this_fitting_mask,
+                                    method='hybrid'
+                                )
+                                flux = flux_jax
+                                vel = vel_jax
+                                disp = disp_jax
+                                jax_fitting_used = True
+                                logger.debug('JAX Gaussian fitting completed '+str(datetime.datetime.now()))
+                            except Exception as e:
+                                logger.warning(f'JAX Gaussian fitting failed: {e}. Falling back to C++/Python fitting.')
+                                jax_fitting_used = False
 
-                            # # Only do verbose if logging level is DEBUG or lower
-                            # if logger.level <= logging.DEBUG:
-                            #     this_fitting_verbose = True
-                            # else:
-                            #     this_fitting_verbose = False
-                            ## Force non-verbose, because multiprocessing pool
-                            ##    resets logging to logger.level = 0....
-                            this_fitting_verbose = False
+                    # Fall back to C++ or Python fitting if JAX not used or failed
+                    if not jax_fitting_used:
+                        my_least_chi_squares_1d_fitter = None
+                        if (_loaded_LeastChiSquares1D):
+                            if self.mod_options.gauss_extract_with_c:
+                                # # we will use the C++ LeastChiSquares1D to run the 1d spectral fitting
+                                # # but note that if a spectrum has data all too close to zero, it will fail.
+                                # # try to prevent this by excluding too low data
+                                # this_fitting_mask = 'auto'
+                                this_fitting_mask = None
+                                if self.data is not None:
+                                    if self.data.mask is not None:
+                                        this_fitting_mask = copy.copy(self.data.mask)
 
-                            # do the least chisquares fitting
-                            my_least_chi_squares_1d_fitter = LeastChiSquares1D(\
-                                    x = self.model_cube.data.spectral_axis.to(u.km/u.s).value,
-                                    data = self.model_cube.data.unmasked_data[:,:,:].value,
-                                    dataerr = None,
-                                    datamask = this_fitting_mask,
-                                    initparams = np.array([mom0 / np.sqrt(2 * np.pi) / np.abs(mom2), mom1, mom2]),
-                                    nthread = 4,
-                                    verbose = this_fitting_verbose)
-                    if my_least_chi_squares_1d_fitter is not None:
-                        logger.debug('my_least_chi_squares_1d_fitter '+str(datetime.datetime.now()))
-                        my_least_chi_squares_1d_fitter.runFitting()
-                        flux = my_least_chi_squares_1d_fitter.outparams[0,:,:] * np.sqrt(2 * np.pi) * my_least_chi_squares_1d_fitter.outparams[2,:,:]
-                        vel = my_least_chi_squares_1d_fitter.outparams[1,:,:]
-                        disp = my_least_chi_squares_1d_fitter.outparams[2,:,:]
-                        flux[np.isnan(flux)] = 0.0
-                        logger.debug('my_least_chi_squares_1d_fitter '+str(datetime.datetime.now()))
-                    else:
-                        for i in range(mom0.shape[0]):
-                            for j in range(mom0.shape[1]):
-                                if i==0 and j==0:
-                                    logger.debug('gaus_fit_sp_opt_leastsq '+str(mom0.shape[0])+'x'+str(mom0.shape[1])+' '+str(datetime.datetime.now())) #<DZLIU><DEBUG>#
-                                best_fit = gaus_fit_sp_opt_leastsq(self.model_cube.data.spectral_axis.to(u.km/u.s).value,
-                                                    self.model_cube.data.unmasked_data[:,i,j].value,
-                                                    mom0[i,j], mom1[i,j], mom2[i,j])
-                                flux[i,j] = best_fit[0] * np.sqrt(2 * np.pi) * best_fit[2]
-                                vel[i,j] = best_fit[1]
-                                disp[i,j] = best_fit[2]
-                                if i==(mom0.shape[0]-1) and j==(mom0.shape[1]-1):
-                                    logger.debug('gaus_fit_sp_opt_leastsq '+str(mom0.shape[0])+'x'+str(mom0.shape[1])+' '+str(datetime.datetime.now())) #<DZLIU><DEBUG>#
+                                # # Only do verbose if logging level is DEBUG or lower
+                                # if logger.level <= logging.DEBUG:
+                                #     this_fitting_verbose = True
+                                # else:
+                                #     this_fitting_verbose = False
+                                ## Force non-verbose, because multiprocessing pool
+                                ##    resets logging to logger.level = 0....
+                                this_fitting_verbose = False
+
+                                # do the least chisquares fitting
+                                my_least_chi_squares_1d_fitter = LeastChiSquares1D(\
+                                        x = self.model_cube.data.spectral_axis.to(u.km/u.s).value,
+                                        data = self.model_cube.data.unmasked_data[:,:,:].value,
+                                        dataerr = None,
+                                        datamask = this_fitting_mask,
+                                        initparams = np.array([mom0 / np.sqrt(2 * np.pi) / np.abs(mom2), mom1, mom2]),
+                                        nthread = 4,
+                                        verbose = this_fitting_verbose)
+                        if my_least_chi_squares_1d_fitter is not None:
+                            logger.debug('my_least_chi_squares_1d_fitter '+str(datetime.datetime.now()))
+                            my_least_chi_squares_1d_fitter.runFitting()
+                            flux = my_least_chi_squares_1d_fitter.outparams[0,:,:] * np.sqrt(2 * np.pi) * my_least_chi_squares_1d_fitter.outparams[2,:,:]
+                            vel = my_least_chi_squares_1d_fitter.outparams[1,:,:]
+                            disp = my_least_chi_squares_1d_fitter.outparams[2,:,:]
+                            flux[np.isnan(flux)] = 0.0
+                            logger.debug('my_least_chi_squares_1d_fitter '+str(datetime.datetime.now()))
+                        else:
+                            for i in range(mom0.shape[0]):
+                                for j in range(mom0.shape[1]):
+                                    if i==0 and j==0:
+                                        logger.debug('gaus_fit_sp_opt_leastsq '+str(mom0.shape[0])+'x'+str(mom0.shape[1])+' '+str(datetime.datetime.now())) #<DZLIU><DEBUG>#
+                                    best_fit = gaus_fit_sp_opt_leastsq(self.model_cube.data.spectral_axis.to(u.km/u.s).value,
+                                                        self.model_cube.data.unmasked_data[:,i,j].value,
+                                                        mom0[i,j], mom1[i,j], mom2[i,j])
+                                    flux[i,j] = best_fit[0] * np.sqrt(2 * np.pi) * best_fit[2]
+                                    vel[i,j] = best_fit[1]
+                                    disp[i,j] = best_fit[2]
+                                    if i==(mom0.shape[0]-1) and j==(mom0.shape[1]-1):
+                                        logger.debug('gaus_fit_sp_opt_leastsq '+str(mom0.shape[0])+'x'+str(mom0.shape[1])+' '+str(datetime.datetime.now())) #<DZLIU><DEBUG>#
                     # ++++++++++++++++++++++++++++++++++++++++++++++++++
 
             elif spec_type == "wavelength":
@@ -619,7 +659,7 @@ class ObsModOptions:
     """
     def __init__(self, xcenter=None, ycenter=None, oversample=1, oversize=1,
                  transform_method='direct', zcalc_truncate=None, n_wholepix_z_min=3,
-                 gauss_extract_with_c=True):
+                 gauss_extract_with_c=True, gauss_extract_with_jax=None):
 
         self.xcenter = xcenter
         self.ycenter = ycenter
@@ -630,6 +670,8 @@ class ObsModOptions:
         self.n_wholepix_z_min = n_wholepix_z_min
         self.gauss_extract_with_c = gauss_extract_with_c
         # Default always try to use the C++ gaussian fitter
+        self.gauss_extract_with_jax = gauss_extract_with_jax
+        # If True, use JAX Gaussian fitting (compatible with JAXNS)
 
 
 class ObsLensingOptions:

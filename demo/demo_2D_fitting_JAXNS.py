@@ -39,6 +39,9 @@ local_param = os.path.join(outdir, 'fitting_2D_jaxns_demo.params')
 # The read_fitting_params parser simply takes the last value for each key.
 #
 # num_live_points=150, dlogZ=0.1 give good convergence (reduced chi-squared ~9).
+#
+# IMPORTANT: Prior bounds match MPFIT parameter bounds exactly!
+# JAXNS uses *_prior_bounds for flat priors (unlike MPFIT which uses *_bounds)
 JAXNS_OVERRIDES = """
 # ----- JAXNS overrides (appended to MPFIT template) -----
 fit_method,      jaxns
@@ -47,18 +50,37 @@ dlogZ,            0.1
 oversampled_chisq, True
 verbose,          True
 
-# Prior types (flat for all parameters in this demo)
-total_mass_prior,    flat
-bt_prior,            flat
-r_eff_disk_prior,    flat
-fdm_prior,           flat
-sigma0_prior,        flat
-sigmaz_prior,        flat
-inc_prior,           flat
-pa_prior,            flat
-xshift_prior,        flat
-yshift_prior,        flat
-vel_shift_prior,     flat
+# Prior types and bounds (matching MPFIT bounds exactly)
+# NOTE: Only free parameters from MPFIT get priors. Fixed parameters stay fixed!
+total_mass_prior,          flat
+total_mass_prior_bounds,   10.0  13.0
+
+r_eff_disk_prior,          flat
+r_eff_disk_prior_bounds,   0.1   30.0
+
+fdm_prior,                 flat
+fdm_prior_bounds,          0.0   1.0
+
+sigma0_prior,              flat
+sigma0_prior_bounds,       5.0   300.0
+
+sigmaz_prior,              flat
+sigmaz_prior_bounds,       0.1   1.0
+
+inc_prior,                 flat
+inc_prior_bounds,          42.0  82.0
+
+pa_prior,                  flat
+pa_prior_bounds,           132.0 152.0
+
+xshift_prior,              flat
+xshift_prior_bounds,       -1.5  1.5
+
+yshift_prior,              flat
+yshift_prior_bounds,       -1.5  1.5
+
+vel_shift_prior,           flat
+vel_shift_prior_bounds,    -100.0  100.0
 """
 
 os.makedirs(outdir, exist_ok=True)
