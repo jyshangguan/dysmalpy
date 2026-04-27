@@ -17,13 +17,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-# JAX Gaussian fitting for moment_calc=False support
-try:
-    from dysmalpy.fitting.jax_gaussian_fitting import fit_gaussian_cube_jax
-    _JAX_GAUSSIAN_AVAILABLE = True
-except ImportError:
-    _JAX_GAUSSIAN_AVAILABLE = False
-
 
 __all__ = ['make_jax_loss_function', 'make_jax_log_prob_function',
            'make_jax_loss_function_1d', 'make_jaxns_log_likelihood']
@@ -874,7 +867,9 @@ def make_jaxns_log_likelihood(gal, fitter):
                 msk = od['mask']
 
                 # Check if we should use Gaussian fitting (moment_calc=False)
-                if not od.get('moment_calc', True) and _JAX_GAUSSIAN_AVAILABLE:
+                if not od.get('moment_calc', True):
+                    # Import here to avoid circular import at module level
+                    from dysmalpy.fitting.jax_gaussian_fitting import fit_gaussian_cube_jax
                     # Use JAX Gaussian fitting for more accurate parameter extraction
                     flux_map, vel_map, disp_map = fit_gaussian_cube_jax(
                         cube_model=cube_model,

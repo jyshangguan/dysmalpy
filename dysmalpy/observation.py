@@ -22,13 +22,6 @@ from dysmalpy.data_classes import Data0D, Data1D, Data2D, Data3D
 from dysmalpy.instrument import Instrument
 from dysmalpy.utils import apply_smoothing_3D, rebin, gaus_fit_sp_opt_leastsq
 
-# JAX Gaussian fitting (optional, for JAXNS compatibility)
-try:
-    from dysmalpy.fitting.jax_gaussian_fitting import fit_gaussian_cube_jax
-    _JAX_GAUSSIAN_AVAILABLE = True
-except ImportError:
-    _JAX_GAUSSIAN_AVAILABLE = False
-
 # LOGGER SETTINGS
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('DysmalPy')
@@ -447,10 +440,11 @@ class Observation:
                     vel = np.zeros(mom0.shape)
                     disp = np.zeros(mom0.shape)
                     # ++++++++++++++++++++++++++++++++++++++++++++++++++
-                    # Try JAX Gaussian fitting first (if enabled and available)
+                    # Try JAX Gaussian fitting first (if enabled)
                     jax_fitting_used = False
-                    if _JAX_GAUSSIAN_AVAILABLE and hasattr(self.mod_options, 'gauss_extract_with_jax'):
-                        if self.mod_options.gauss_extract_with_jax:
+                    if hasattr(self.mod_options, 'gauss_extract_with_jax') and self.mod_options.gauss_extract_with_jax:
+                            # Import here to avoid circular import at module level
+                            from dysmalpy.fitting.jax_gaussian_fitting import fit_gaussian_cube_jax
                             logger.debug('Using JAX Gaussian fitting '+str(datetime.datetime.now()))
                             # Get mask if available
                             this_fitting_mask = None
