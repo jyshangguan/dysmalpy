@@ -213,3 +213,66 @@ each in float64 on GPU).  Multiple intermediate arrays push GPU memory past 24 G
 **Fix:** `zcalc_truncate=True` (default) uses the active-only path, which keeps
 intermediate arrays on CPU (numpy) and only propagates active z-slices through
 JAX.  Peak GPU memory drops from ~18 GB to < 100 MB.
+
+---
+
+## 14. JAXNS Version Differences (Static vs Dynamic Nested Sampling)
+
+JAXNS 2.4.13 (our version) uses `DefaultNestedSampler` with **static** nested sampling
+(fixed number of live points), while JAXNS 2.6.7+ uses `NestedSampler` with
+**dynamic** nested sampling (adjusts live points during sampling).
+
+**Symptom:** Missing "zigzag nlive" pattern in first row of diagnostic plots.
+
+**Not a bug.**  Static nested sampling (JAXNS 2.4.13) produces a flat line for
+`num_live_points` because the number is fixed.  Dynamic nested sampling (JAXNS
+2.6.7+) shows the characteristic zigzag pattern as live points are adjusted
+during sampling.
+
+**Implication:** Diagnostic plots from JAXNS 2.4.13 will look different from
+documentation examples (which use 2.6.7+).  Both are correct for their respective
+versions.
+
+**Solution:** Either accept the 2.4.13 behavior (static is fine for most use cases)
+or upgrade to JAXNS 2.6.7+ if dynamic sampling features are needed.
+
+---
+
+## 15. Wide Prior Ranges Cause Inefficient JAXNS Sampling
+
+JAXNS explores the full prior volume by design.  Wide prior ranges that include
+unphysical parameter combinations cause JAXNS to waste computation exploring
+regions with extremely poor likelihood values.
+
+**Symptom:** Large percentage (20-30%) of JAXNS samples have very bad likelihood
+(log_L < -200), with worst cases like log_L = -60,000 (chi-squared ≈ 120,000).
+
+**Example:**
+```python
+# Too wide - causes 23% bad samples
+total_mass_prior_bounds: 10.0 13.0  # 3 dex range
+inc_prior_bounds: 42.0 82.0         # 40 degree range
+
+# Better - reduces bad samples to <5%
+total_mass_prior_bounds: 11.5 12.5  # 1 dex range
+inc_prior_bounds: 55.0 70.0         # 15 degree range
+```
+
+**Not a bug.**  JAXNS is working correctly - it's exploring the full prior volume
+as designed.  The bad samples don't affect the final results (best-fit parameters
+are still good).
+
+**Impact:**
+- Wasted computation time
+- Slower convergence
+- Abnormal diagnostic plots (weight evolution in third row)
+
+**Fix:** Use narrower prior bounds based on:
+1. Domain knowledge / physical constraints
+2. MPFIT results ± uncertainty margin
+3. Literature values for similar systems
+
+**Recommendation:** After an initial MPFIT run, update the JAXNS priors to be
+centered on the MPFIT best-fit values with ±20-50% margins.  This dramatically
+improves efficiency without excluding true posterior support.
+
