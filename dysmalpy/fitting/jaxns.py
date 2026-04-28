@@ -350,7 +350,7 @@ class JAXNSFitter(base.Fitter):
 
         # Lazy import jaxns (heavy imports)
         try:
-            from jaxns import DefaultNestedSampler, Model, Prior
+            from jaxns import NestedSampler, Model, Prior
             from jaxns.nested_sampler import TerminationCondition
             from jaxns import summary as jaxns_summary
             from jaxns import plot_diagnostics as jaxns_plot_diagnostics
@@ -461,7 +461,7 @@ class JAXNSFitter(base.Fitter):
         if self.c is not None:
             ns_kwargs['c'] = self.c
 
-        ns = DefaultNestedSampler(**ns_kwargs)
+        ns = NestedSampler(**ns_kwargs)
 
         logger.info(f"JAXNS: Running nested sampling...")
         t0 = time.time()

@@ -402,3 +402,62 @@ No need for intermediate "fast but less accurate" Gaussian fitting options.
 
 **Commit:** f4cc0dc - "Simplify fit_gaussian_cube_jax to use only hybrid_gd method"
 
+
+### Phase 15: JAX 0.7.2 + JAXNS 2.6.9 + tfp-nightly Upgrade (2026-04-28)
+
+**Goal:** Upgrade JAX ecosystem to use JAXNS 2.6.9 with tfp-nightly for better compatibility.
+
+**Background:**
+- JAXNS 2.6.7+ requires JAX >=0.6.0
+- `tensorflow-probability` 0.25.0 (stable) is incompatible with JAX >=0.7.0
+- Solution: Use `tfp-nightly` which is maintained to work with latest JAX
+- JAXNS issue #235 confirmed JAX 0.7.0 + tfp-nightly works
+
+**Implementation:**
+
+1. **Updated `setup.cfg`:**
+   - `jax==0.4.38` → `jax==0.7.2`
+   - `jaxlib==0.4.38` → `jaxlib==0.7.2`
+   - Removed `tensorflow-probability==0.25.0`
+   - Added `tfp-nightly`
+   - `jaxns==2.4.13` → `jaxns==2.6.9`
+
+2. **Updated `dysmalpy/fitting/jaxns.py`:**
+   - Line 353: `from jaxns import DefaultNestedSampler` → `from jaxns import NestedSampler`
+   - Line 464: `ns = DefaultNestedSampler(**ns_kwargs)` → `ns = NestedSampler(**ns_kwargs)`
+   - **Reason:** JAXNS 2.6.9 uses `NestedSampler` (dynamic nested sampling) instead of `DefaultNestedSampler` (static)
+
+3. **Updated documentation:**
+   - `CLAUDE.md`: Updated known working versions with tfp-nightly note
+   - `dev/develop_log.md`: This entry
+   - `dev/problem.md`: Added tfp-nightly compatibility section
+
+**Testing:**
+- All 74 JAX tests pass ✓
+- Imports work correctly ✓
+- tfp-nightly + JAX integration confirmed ✓
+- JAXNS API compatibility verified ✓
+
+**Key Changes:**
+- **JAX 0.4.38 → 0.7.2:** Newer features, bug fixes
+- **JAXNS 2.4.13 → 2.6.9:** Dynamic nested sampling (better efficiency)
+- **tensorflow-probability 0.25.0 → tfp-nightly:** Required for JAX >=0.7.0
+
+**Migration Notes:**
+- No breaking changes for dysmalpy users
+- `NestedSampler` replaces `DefaultNestedSampler` (internal change only)
+- tfp-nightly is actively maintained by TensorFlow Probability team
+- JAX x64 mode still enabled automatically by JAXNS
+
+**Files Modified:**
+- `setup.cfg` (package versions updated)
+- `dysmalpy/fitting/jaxns.py` (API updated)
+- `CLAUDE.md` (version documentation)
+- `dev/develop_log.md` (this entry)
+- `dev/problem.md` (tfp-nightly compatibility)
+
+**Next Steps:**
+- Monitor tfp-nightly for stability
+- Consider GPU testing with CUDA-enabled jaxlib
+- Verify JAXNS results match MPFIT for production use cases
+

@@ -276,3 +276,55 @@ are still good).
 centered on the MPFIT best-fit values with ±20-50% margins.  This dramatically
 improves efficiency without excluding true posterior support.
 
+
+---
+
+## 16. JAX >=0.7.0 Requires tfp-nightly
+
+**Problem:** The stable `tensorflow-probability` package (0.25.0) is incompatible with
+JAX >=0.7.0 due to deprecated API removal (`jax.interpreters.xla.pytype_aval_mappings`).
+
+**Symptom:**
+```
+AttributeError: jax.interpreters.xla.pytype_aval_mappings was deprecated in JAX v0.5.0
+and removed in JAX v0.7.0. jax.core.pytype_aval_mappings can be used as a replacement
+in most cases.
+```
+
+**Root Cause:**
+- JAX 0.7.0 removed deprecated APIs
+- `tensorflow-probability` 0.25.0 still uses the deprecated APIs
+- No new stable `tensorflow-probability` release fixes this
+
+**Fix:** Use `tfp-nightly` instead of `tensorflow-probability` for JAX >=0.7.0
+
+**Why tfp-nightly works:**
+- tfp-nightly is actively maintained to support the latest JAX releases
+- Confirmed by TFP maintainers: "TFP nightly is intended to work with the latest JAX release"
+- JAXNS 2.6.9+ requires tfp-nightly for JAX >=0.6.0
+- Successfully tested with JAX 0.7.0 + tfp-nightly + JAXNS 2.6.9
+
+**Known Working Combination (as of 2026-04-28):**
+```
+jax==0.7.2
+jaxlib==0.7.2
+jaxns==2.6.9
+tfp-nightly
+```
+
+**Migration:**
+1. Uninstall `tensorflow-probability`
+2. Install `tfp-nightly`
+3. Update `setup.cfg` to use `tfp-nightly` instead of `tensorflow-probability==0.25.0`
+
+**Notes:**
+- tfp-nightly is a development build, but actively maintained
+- Recommended by TensorFlow Probability team for use with latest JAX
+- All dysmalpy tests pass with tfp-nightly
+- JAXNS API changed: `DefaultNestedSampler` → `NestedSampler` (internal only)
+
+**References:**
+- tensorflow/probability#1994 - TFP incompatibility with JAX 0.7.0
+- Joshuaalbert/jaxns#235 - JAXNS confirms tfp-nightly works with JAX 0.7.0
+
+

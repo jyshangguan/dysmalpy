@@ -98,12 +98,16 @@ Key differences from the original (`dysmalpy_origin`) to current (`main`):
 **Known working versions (as of 2026-04):**
 
 ```
-jax==0.4.38, jaxlib==0.4.38, jax-cuda12-plugin==0.4.38
-jaxns==2.4.13, tensorflow-probability==0.25.0
+jax==0.7.2, jaxlib==0.7.2
+jaxns==2.6.9, tfp-nightly
 numpy>=2.0, astropy>=6.0
 ```
 
-JAX, jaxlib, and downstream packages (jaxns, tensorflow-probability) must be
+**Note:** JAX 0.7.0+ requires `tfp-nightly` (not stable `tensorflow-probability`). 
+JAX 0.7.2 uses `tfp-nightly` which is maintained to work with the latest JAX releases.
+JAXNS 2.6.9 uses `NestedSampler` (dynamic nested sampling), not `DefaultNestedSampler`.
+
+JAX, jaxlib, and downstream packages (jaxns, tfp-nightly) must be
 pinned together.  A version mismatch causes hard-to-diagnose import errors or
 segfaults.
 
