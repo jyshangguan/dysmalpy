@@ -460,8 +460,8 @@ class Observation:
                                 flux_jax, vel_jax, disp_jax = fit_gaussian_cube_jax(
                                     cube_model=cube_data,
                                     spec_arr=spec_arr,
-                                    mask=this_fitting_mask,
-                                    method='closed_form'  # Fast, accurate, practical for JAXNS
+                                    mask=this_fitting_mask
+                                    # Uses hybrid_gd internally: closed-form + gradient descent
                                 )
                                 flux = flux_jax
                                 vel = vel_jax

@@ -29,7 +29,6 @@ import warnings
 __all__ = [
     'closed_form_gaussian',
     'gaussian_loss',
-    'refine_gaussian_jax',
     'custom_gradient_descent',
     'fit_gaussian_cube_jax',
 ]
@@ -84,7 +83,7 @@ def closed_form_gaussian(x, y, yerr=None):
 
     See Also
     --------
-    refine_gaussian_jax : Refine closed-form estimates using optimization
+    custom_gradient_descent : Gradient descent refinement function
     gaussian_loss : Chi-squared loss function for optimization
     """
     # Handle weights
@@ -151,67 +150,6 @@ def gaussian_loss(params, x, y, yerr):
     chi2 = jnp.sum((residuals ** 2) / (yerr ** 2 + 1e-10))
 
     return chi2
-
-
-@jax.jit
-def refine_gaussian_jax(init_params, x, y, yerr):
-    """
-    Refine Gaussian parameters using JAX gradient-based optimization.
-
-    Takes closed-form MLE estimates (or any initial guess) and refines
-    them using the L-BFGS-B optimization algorithm with automatic
-    differentiation. This improves accuracy when the closed-form
-    assumptions aren't perfectly met.
-
-    Parameters
-    ----------
-    init_params : array-like
-        Initial parameter estimates [A, μ, σ]
-    x : array-like
-        Spectral axis values
-    y : array-like
-        Observed spectral flux/intensity
-    yerr : array-like
-        Measurement uncertainties
-
-    Returns
-    -------
-    params : jax.Array
-        Refined Gaussian parameters [A, μ, σ]
-
-    Notes
-    -----
-    Uses BFGS (Quasi-Newton method) rather than L-BFGS-B because our
-    parameters are unbounded (amplitude, center, width can be any positive
-    value). The optimization stops based on gradient tolerance (gtol)
-    and maximum iterations.
-
-    The automatic differentiation (jax.grad) provides exact gradients
-    of the chi-squared loss function, avoiding numerical approximation
-    errors from finite differences.
-
-    Examples
-    --------
-    >>> # Get initial estimates from closed-form solution
-    >>> init_params = closed_form_gaussian(x, y)
-    >>> # Refine using optimization
-    >>> refined_params = refine_gaussian_jax(init_params, x, y, yerr)
-    """
-    # Optimize using BFGS with automatic gradients
-    result = optimize.minimize(
-        gaussian_loss,
-        init_params,
-        args=(x, y, yerr),
-        method='BFGS',
-        options={
-            'maxiter': 100,      # Maximum iterations
-            'gtol': 1e-6,         # Gradient tolerance
-            'line_search_maxiter': 50
-        }
-    )
-
-    return result.x
-
 
 @jax.jit
 def custom_gradient_descent(init_params, x, y, yerr, n_steps=10, learning_rate=0.01):
@@ -295,7 +233,7 @@ def custom_gradient_descent(init_params, x, y, yerr, n_steps=10, learning_rate=0
     return final_params
 
 
-def fit_gaussian_cube_jax(cube_model, spec_arr, mask=None, method='hybrid_gd'):
+def fit_gaussian_cube_jax(cube_model, spec_arr, mask=None):
     """
     Vectorized Gaussian fitting for entire 3D data cube.
 
@@ -313,12 +251,6 @@ def fit_gaussian_cube_jax(cube_model, spec_arr, mask=None, method='hybrid_gd'):
         Boolean mask with shape (ny, nx) indicating valid pixels.
         Pixels where mask=False will return [0, 0, 0].
         If None, all pixels are processed.
-    method : str, optional
-        Fitting method:
-        - 'closed_form': Use only closed-form MLE (fastest, 2.5x overhead, may be biased)
-        - 'hybrid': Closed-form + BFGS refinement (most accurate, 245x overhead, very slow)
-        - 'hybrid_gd': Closed-form + custom GD refinement (recommended, 4-6x overhead)
-        Default is 'hybrid_gd'.
 
     Returns
     -------
@@ -348,10 +280,8 @@ def fit_gaussian_cube_jax(cube_model, spec_arr, mask=None, method='hybrid_gd'):
     - Spectra with very low total flux (<1e-10) return [0, 0, 0]
     - Numerical stability is maintained through epsilon additions
 
-    **Method comparison:**
-        - 'closed_form': Instant (~1.5ms per 729 pixels), 2.5x overhead vs moments
-        - 'hybrid_gd': Fast (~6-10ms per 729 pixels), 4-6x overhead vs moments (recommended)
-        - 'hybrid': Slow (~372ms per 729 pixels), 245x overhead vs moments (most accurate)
+    **Fitting method:** Always uses hybrid_gd: closed-form MLE for initial estimates
+    followed by custom gradient descent refinement (~4-6x overhead vs moment extraction).
 
     Examples
     --------
@@ -367,13 +297,13 @@ def fit_gaussian_cube_jax(cube_model, spec_arr, mask=None, method='hybrid_gd'):
     >>>             10.0 * jnp.exp(-0.5 * ((spec_arr - 5.0) / 20.0) ** 2)
     >>>         )
     >>> # Fit all pixels
-    >>> flux, vel, disp = fit_gaussian_cube_jax(cube_model, spec_arr, method='hybrid')
+    >>> flux, vel, disp = fit_gaussian_cube_jax(cube_model, spec_arr)
     >>> print(f"Velocity range: {vel.min():.2f} to {vel.max():.2f} km/s")
 
     See Also
     --------
     closed_form_gaussian : Core fitting function for single spectrum
-    refine_gaussian_jax : Optimization refinement function
+    custom_gradient_descent : Gradient descent refinement function
     observation.py : Integration with dysmalpy observation pipeline
     """
     nspec, ny, nx = cube_model.shape
@@ -395,20 +325,13 @@ def fit_gaussian_cube_jax(cube_model, spec_arr, mask=None, method='hybrid_gd'):
 
     # Define fitting function that works on a single spectrum
     def fit_spectrum(spectrum):
-        """Fit Gaussian to one spectrum"""
+        """Fit Gaussian to one spectrum using hybrid_gd method"""
         # Use uniform errors for all spectral channels
         yerr = jnp.ones_like(spectrum)
 
-        if method == 'closed_form':
-            return closed_form_gaussian(spec_arr, spectrum, yerr)
-        elif method == 'hybrid':
-            init = closed_form_gaussian(spec_arr, spectrum, yerr)
-            return refine_gaussian_jax(init, spec_arr, spectrum, yerr)
-        elif method == 'hybrid_gd':
-            init = closed_form_gaussian(spec_arr, spectrum, yerr)
-            return custom_gradient_descent(init, spec_arr, spectrum, yerr)
-        else:
-            raise ValueError(f"Unknown method: {method}")
+        # hybrid_gd: closed-form MLE + gradient descent refinement
+        init = closed_form_gaussian(spec_arr, spectrum, yerr)
+        return custom_gradient_descent(init, spec_arr, spectrum, yerr)
 
     # Fit all spectra (vectorized over axis 1, which is the spatial pixels)
     all_params = jax.vmap(fit_spectrum, in_axes=1)(cube_reshaped)  # (n_pixels, 3)
@@ -436,7 +359,7 @@ def fit_gaussian_cube_jax(cube_model, spec_arr, mask=None, method='hybrid_gd'):
     return flux_map, vel_map, disp_map
 
 
-def fit_gaussian_cube_jax_sequential(cube_model, spec_arr, mask=None, method='hybrid'):
+def fit_gaussian_cube_jax_sequential(cube_model, spec_arr, mask=None):
     """
     Sequential version of Gaussian fitting for data cubes.
 
@@ -453,8 +376,6 @@ def fit_gaussian_cube_jax_sequential(cube_model, spec_arr, mask=None, method='hy
         Spectral axis values (nspec,)
     mask : array-like, optional
         Boolean mask (ny, nx)
-    method : str, optional
-        'closed_form' or 'hybrid'
 
     Returns
     -------
@@ -466,6 +387,8 @@ def fit_gaussian_cube_jax_sequential(cube_model, spec_arr, mask=None, method='hy
     This version processes pixels one at a time in a Python loop, which is
     slower than the vectorized version but more memory-efficient. Use this
     for very large data cubes or when GPU memory is limited.
+
+    Always uses hybrid_gd: closed-form MLE + gradient descent refinement.
     """
     nspec, ny, nx = cube_model.shape
 
@@ -499,14 +422,9 @@ def fit_gaussian_cube_jax_sequential(cube_model, spec_arr, mask=None, method='hy
             disp_map = disp_map.at[jnp.unravel_index(i, (ny, nx))].set(0.0)
             continue
 
-        # Fit this spectrum
-        if method == 'closed_form':
-            params = closed_form_gaussian(spec_arr, spectrum)
-        elif method == 'hybrid':
-            init_params = closed_form_gaussian(spec_arr, spectrum)
-            params = refine_gaussian_jax(init_params, spec_arr, spectrum, jnp.ones_like(spectrum))
-        else:
-            raise ValueError(f"Unknown method: {method}")
+        # Fit this spectrum using hybrid_gd
+        init_params = closed_form_gaussian(spec_arr, spectrum)
+        params = custom_gradient_descent(init_params, spec_arr, spectrum, jnp.ones_like(spectrum))
 
         # Convert to flux, vel, disp
         A, mu, sigma = params
