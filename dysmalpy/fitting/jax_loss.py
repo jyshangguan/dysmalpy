@@ -871,12 +871,15 @@ def make_jaxns_log_likelihood(gal, fitter):
                     # Import here to avoid circular import at module level
                     from dysmalpy.fitting.jax_gaussian_fitting import fit_gaussian_cube_jax
                     # Use JAX Gaussian fitting for more accurate parameter extraction
-                    # Note: Using 'closed_form' method for speed (2.5x overhead vs 245x for hybrid)
+                    # Note: Using 'hybrid_gd' method (custom gradient descent refinement)
+                    # - 4-6x overhead vs closed-form (~1-2 min for 10k JAXNS iterations)
+                    # - More accurate than closed-form (reduces bias in asymmetric cases)
+                    # - Much faster than BFGS hybrid (~4x vs ~245x overhead)
                     flux_map, vel_map, disp_map = fit_gaussian_cube_jax(
                         cube_model=cube_model,
                         spec_arr=spec_arr,
                         mask=(msk == 1),  # Fit only valid pixels (where mask=1)
-                        method='closed_form'  # Fast, accurate, practical for JAXNS
+                        method='hybrid_gd'  # Custom GD refinement (accurate, practical for JAXNS)
                     )
                 else:
                     # Use moment extraction (faster, JAX-traceable)
