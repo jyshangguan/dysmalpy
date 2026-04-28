@@ -328,3 +328,58 @@ tfp-nightly
 - Joshuaalbert/jaxns#235 - JAXNS confirms tfp-nightly works with JAX 0.7.0
 
 
+---
+
+## 17. JAX 0.7.2 GPU Support Requires CUPTI Library
+
+**Problem:** JAX 0.7.2 with `jax-cuda12-plugin` fails to initialize GPU backend with error
+"Unable to load cuPTI" even when CUDA is properly installed.
+
+**Symptom:**
+```
+RuntimeError: Unable to load cuPTI. Is it installed?
+RuntimeError: jaxlib/cuda/versions_helpers.cc:48: operation cuptiGetVersion(&version) failed:
+Unknown CUPTI error 999. This probably means that JAX was unable to load cupti.
+```
+
+**Root Cause:**
+- CUPTI (CUDA Profiling Tools Interface) is required by JAX 0.7.2 for GPU support
+- CUPTI is installed in `/usr/local/cuda-12.4/extras/CUPTI/lib64/` but not in the default library path
+- JAX cannot find `libcupti.so` without `LD_LIBRARY_PATH` pointing to the CUPTI directory
+
+**Fix:** Add CUPTI library to `LD_LIBRARY_PATH` before running Python
+
+**Temporary fix (current session only):**
+```bash
+export LD_LIBRARY_PATH=/usr/local/cuda-12.4/extras/CUPTI/lib64:$LD_LIBRARY_PATH
+```
+
+**Permanent fix (add to `~/.zshrc`):**
+```bash
+# CUDA CUPTI library path for JAX 0.7.2 GPU support
+export LD_LIBRARY_PATH=/usr/local/cuda-12.4/extras/CUPTI/lib64:$LD_LIBRARY_PATH
+```
+
+**Verification:**
+```python
+import jax
+print(f'JAX backend: {jax.devices()[0].platform}')
+# Should print: "gpu" instead of "cpu"
+```
+
+**Known Working Setup (as of 2026-04-29):**
+```
+jax==0.7.2
+jaxlib==0.7.2
+jax-cuda12-plugin==0.7.2
+CUDA 12.4 with CUPTI in /usr/local/cuda-12.4/extras/CUPTI/lib64/
+LD_LIBRARY_PATH includes /usr/local/cuda-12.4/extras/CUPTI/lib64/
+```
+
+**Notes:**
+- This is specific to JAX 0.7.2 + CUDA 12.4
+- CUPTI is part of the CUDA toolkit but in a non-standard location
+- Without this fix, JAX falls back to CPU (still works but slower)
+- Multiple GPU devices will be available once CUPTI is loaded (e.g., 8 CUDA devices)
+
+

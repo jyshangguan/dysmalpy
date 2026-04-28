@@ -461,3 +461,47 @@ No need for intermediate "fast but less accurate" Gaussian fitting options.
 - Consider GPU testing with CUDA-enabled jaxlib
 - Verify JAXNS results match MPFIT for production use cases
 
+
+---
+
+**Additional Updates (2026-04-29): GPU Support Fix**
+
+**Problem:** After upgrading to JAX 0.7.2, GPU backend failed to initialize with error:
+```
+RuntimeError: Unable to load cuPTI. Is it installed?
+```
+
+**Root Cause:** 
+- JAX 0.7.2 requires CUPTI (CUDA Profiling Tools Interface) for GPU support
+- CUPTI library exists at `/usr/local/cuda-12.4/extras/CUPTI/lib64/` but not in `LD_LIBRARY_PATH`
+- `jax-cuda12-plugin==0.7.2` installed but cannot find CUPTI without library path
+
+**Solution:**
+
+1. **Installed CUDA plugin in both environments:**
+   ```bash
+   pip install jax-cuda12-plugin==0.7.2
+   conda run -n alma pip install jax-cuda12-plugin==0.7.2
+   ```
+
+2. **Added CUPTI to library path permanently:**
+   - Added to `~/.zshrc`:
+   ```bash
+   # CUDA CUPTI library path for JAX 0.7.2 GPU support
+   export LD_LIBRARY_PATH=/usr/local/cuda-12.4/extras/CUPTI/lib64:$LD_LIBRARY_PATH
+   ```
+
+3. **Updated documentation:**
+   - `setup.cfg`: Added comment about jax-cuda12-plugin for GPU support
+   - `dev/problem.md`: Added Problem #17 about CUPTI requirement
+
+**Verification:**
+- base environment: 8 GPU devices available ✓
+- alma environment: 8 GPU devices available ✓
+- JAX backend: `gpu` (not `cpu`) ✓
+
+**Current Status:**
+- Both `base` and `alma` environments fully upgraded
+- GPU support working in both environments
+- CUPTI library path configured permanently
+- All tests passing with GPU acceleration
