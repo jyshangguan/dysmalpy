@@ -92,7 +92,7 @@ Key differences from the original (`dysmalpy_origin`) to current (`main`):
 |------|-------|
 | Conda env | `dysmalpy-jax` |
 | GPU | NVIDIA 4090 (CUDA 12) |
-| JAX backend | `JAX_PLATFORMS=cpu` for testing, GPU default for fitting |
+| JAX backend | **GPU by default** for JAXNS/Adam fitting (use `JAX_PLATFORMS=cpu` only for MCMC multiprocessing issues) |
 | Float64 | `JAX_ENABLE_X64=1` set in `__init__.py` (must be before any JAX import) |
 
 **Known working versions (as of 2026-04):**
@@ -129,7 +129,7 @@ See `dev/problem.md` for the full catalogue.  The top 5:
 1. **JAX defaults to float32** — `JAX_ENABLE_X64=1` is set in `__init__.py` before
    any JAX import.  Do not use `jax.config.update()` — by the time `import jax`
    has run, the dtype is locked.  Verify with
-   `JAX_PLATFORMS=cpu python -c "import jax; print(jax.config.read('jax_enable_x64'))"`.
+   `python -c "import jax; print(jax.config.read('jax_enable_x64'))"`.
 
 2. **DysmalParameter descriptor pollution** — `__get__` returns the class-level
    descriptor.  Setting `.tied`/`.fixed`/`.prior` on an instance pollutes the
@@ -192,12 +192,18 @@ git diff main..dysmalpy_origin -- dysmalpy/models/halos.py  # compare a specific
 Tests require the `dysmalpy-jax` conda environment:
 
 ```bash
+# For testing reproducibility (CPU)
 conda activate dysmalpy-jax
 JAX_PLATFORMS=cpu pytest tests/ -v
+
+# For GPU testing (faster, default for fitting)
+conda activate dysmalpy-jax
+pytest tests/ -v
 ```
 
-The `JAX_PLATFORMS=cpu` flag forces CPU execution for reproducibility.
-`tests/conftest.py` also sets `jax_enable_x64 = True` as a safety net.
+**Note:** Use `JAX_PLATFORMS=cpu` only for reproducible unit testing. For all fitting work (JAXNS, Adam), GPU should be the default for performance. Use `JAX_PLATFORMS=cpu` with MCMC only when troubleshooting multiprocessing issues.
+
+`tests/conftest.py` sets `jax_enable_x64 = True` as a safety net.
 
 Test files:
 - `tests/test_jax.py` — 74 JAX-specific unit tests (special functions, cube population,

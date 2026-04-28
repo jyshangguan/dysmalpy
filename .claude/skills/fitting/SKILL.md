@@ -131,8 +131,9 @@ pool = get_context('forkserver').Pool(self.nCPUs)
 1. Check `_model` back-references (pickle issue above)
 2. Check that `_get_free_parameters` and `_update_tied_parameters` agree
 3. Check that initial walker positions satisfy all prior/bound constraints
-4. Verify `JAX_PLATFORMS=cpu` is set (GPU multiprocessing is problematic)
-5. Check that priors are not accidentally zero-probability at walker positions
+4. For MCMC with multiprocessing: Use `JAX_PLATFORMS=cpu` (GPU multiprocessing is problematic)
+5. For JAXNS/Adam: Use GPU by default (no multiprocessing issues)
+6. Check that priors are not accidentally zero-probability at walker positions
 
 ## Fitting Workflow
 
