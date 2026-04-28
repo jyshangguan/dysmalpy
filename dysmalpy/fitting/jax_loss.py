@@ -875,7 +875,7 @@ def make_jaxns_log_likelihood(gal, fitter):
                     flux_map, vel_map, disp_map = fit_gaussian_cube_jax(
                         cube_model=cube_model,
                         spec_arr=spec_arr,
-                        mask=(msk == 0),  # JAX uses True for valid pixels
+                        mask=(msk == 1),  # Fit only valid pixels (where mask=1)
                         method='closed_form'  # Fast, accurate, practical for JAXNS
                     )
                 else:
