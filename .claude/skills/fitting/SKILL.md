@@ -14,15 +14,32 @@ description: >
 **Before running any JAX-based fitting (JAXNS, JAXAdam):**
 
 ```bash
-# 1. Set cuPTI library path for GPU support
-export LD_LIBRARY_PATH=/usr/local/cuda-12.4/extras/CUPTI/lib64:/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH
+# 1. Find cuPTI library path (location varies by system)
+find /usr/local/cuda* -name "libcupti.so" 2>/dev/null
 
-# 2. Activate conda environment
+# 2. Set environment variables (adjust path for your system)
+export LD_LIBRARY_PATH=/usr/local/cuda-12.4/extras/CUPTI/lib64:/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH
+export JAX_ENABLE_X64=1
+
+# 3. Activate conda environment
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate alma
+```
 
-# OR use the provided script
-source activate_alma.sh
+**Create a local activation script (optional, not tracked in git):**
+
+```bash
+# Create ~/activate_dysmalpy.sh with your system-specific paths
+cat > ~/activate_dysmalpy.sh << 'EOF'
+#!/bin/bash
+export PYTHONNOUSERSITE=1
+export LD_LIBRARY_PATH=/usr/local/cuda-12.4/extras/CUPTI/lib64:/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH
+export JAX_ENABLE_X64=1
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate alma
+EOF
+chmod +x ~/activate_dysmalpy.sh
+source ~/activate_dysmalpy.sh
 ```
 
 **To select a specific GPU:**

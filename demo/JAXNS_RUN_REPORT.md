@@ -58,15 +58,25 @@ demo/demo_2D_output_jaxns/
 
 ## How to Replicate
 
-### 1. Environment Setup
+### 1. Find cuPTI Library Location
 
-Create a script (e.g., `run_jaxns_demo.sh`) with:
+**The cuPTI library location varies by system. Find it first:**
 
 ```bash
-#!/bin/bash
+# Find cuPTI on your system
+find /usr/local/cuda* -name "libcupti.so" 2>/dev/null
+# Common locations:
+#   /usr/local/cuda-12.4/extras/CUPTI/lib64/    (NVIDIA CUDA 12.x)
+#   $CONDA_PREFIX/lib/                         (conda-forge)
+#   /usr/local/cuda-11.x/extras/CUPTI/lib64/ (NVIDIA CUDA 11.x)
+```
 
-# CRITICAL: Set cuPTI library path BEFORE importing JAX
+### 2. Set Environment Variables
+
+```bash
+# Set cuPTI library path (adjust for your system based on step 1)
 export LD_LIBRARY_PATH=/usr/local/cuda-12.4/extras/CUPTI/lib64:/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH
+export JAX_ENABLE_X64=1
 
 # Activate conda environment
 source ~/miniconda3/etc/profile.d/conda.sh
@@ -74,24 +84,32 @@ conda activate alma
 
 # Select GPU (choose one with enough free memory)
 export CUDA_VISIBLE_DEVICES=5
+```
 
+### 3. Run Demo
+
+```bash
 # Run demo with unbuffered output
 python -u demo/demo_2D_fitting_JAXNS.py
 ```
 
-### 2. Or Run Interactively
+### 4. Or Create Local Activation Script (Optional)
+
+**Create your own machine-specific activation script:**
 
 ```bash
-# Set up environment
+# Create ~/activate_dysmalpy.sh with YOUR system paths
+cat > ~/activate_dysmalpy.sh << 'EOF'
+#!/bin/bash
+export PYTHONNOUSERSITE=1
 export LD_LIBRARY_PATH=/usr/local/cuda-12.4/extras/CUPTI/lib64:/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH
+export JAX_ENABLE_X64=1
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate alma
+EOF
 
-# Check available GPUs
-nvidia-smi --query-gpu=index,memory.free --format=csv
-
-# Run on selected GPU (e.g., GPU 5)
-CUDA_VISIBLE_DEVICES=5 python demo/demo_2D_fitting_JAXNS.py
+chmod +x ~/activate_dysmalpy.sh
+source ~/activate_dysmalpy.sh
 ```
 
 ### 3. Check GPU Memory Before Running

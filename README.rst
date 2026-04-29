@@ -82,30 +82,45 @@ supporting JAXNS nested sampling and JAX-Adam optimization. For GPU acceleration
 
 ::
 
+   # Find CUDA cuPTI library location (adjust path as needed for your system)
    export LD_LIBRARY_PATH=/usr/local/cuda-12.4/extras/CUPTI/lib64:/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH
+
+   # Enable float64 precision
    export JAX_ENABLE_X64=1
 
-3. Activate the environment:
+   # Optional: Select specific GPU (default: all GPUs)
+   export CUDA_VISIBLE_DEVICES=0
+
+3. Verify JAX GPU support:
 
 ::
 
-   source activate_alma.sh
+   python -c "import jax; print('Devices:', jax.devices()); print('X64:', jax.config.read('jax_enable_x64'))"
 
 4. Run fitting:
 
 ::
 
    # For JAXNS nested sampling (recommended)
-   CUDA_VISIBLE_DEVICES=0 python demo/demo_2D_fitting_JAXNS.py
+   python demo/demo_2D_fitting_JAXNS.py
 
    # For JAX-Adam optimization
-   CUDA_VISIBLE_DEVICES=0 python demo/demo_1D_fitting_JAXAdam.py
+   python demo/demo_1D_fitting_JAXAdam.py
 
-See `demo/JAXNS_RUN_REPORT.md`_ for detailed setup instructions and troubleshooting guide.
+.. note:: **Finding cuPTI library location:** The cuPTI library path varies by system.
+   Common locations:
+
+   * **CUDA 12.x:** ``/usr/local/cuda-12.4/extras/CUPTI/lib64/``
+   * **conda-forge CUDA:** ``$CONDA_PREFIX/lib/``
+   * **System CUDA:** ``/usr/lib/x86_64-linux-gnu/``
+
+   Find it with: ``find /usr/local/cuda* -name "libcupti.so" 2>/dev/null``
 
 .. note:: JAXNS 2.6.9 does NOT support multi-GPU parallelization. Use ``CUDA_VISIBLE_DEVICES``
    to select ONE GPU. Performance scales with the ``c`` parameter (parallel Markov chains),
    NOT with multiple GPUs.
+
+**See** `demo/JAXNS_RUN_REPORT.md`_ **for detailed setup instructions and troubleshooting guide.**
 
 .. _MPFIT: https://code.google.com/archive/p/astrolibpy
 .. _emcee: https://emcee.readthedocs.io

@@ -122,7 +122,7 @@ segfaults.
 git clone <repository_url>
 cd dysmalpy
 
-# 2. Create conda environment (if using alma environment)
+# 2. Create conda environment
 conda create -n alma python=3.11
 conda activate alma
 
@@ -132,8 +132,14 @@ pip install jaxns==2.6.9 tfp-nightly
 pip install numpy>=2.0 astropy>=6.0 matplotlib scipy
 pip install -e .
 
-# 4. Set up environment (REQUIRED for GPU support)
-source activate_alma.sh
+# 4. Find and set cuPTI library path (REQUIRED for GPU support)
+# Common locations (adjust for your system):
+export LD_LIBRARY_PATH=/usr/local/cuda-12.4/extras/CUPTI/lib64:/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH
+# Or find it automatically:
+# export LD_LIBRARY_PATH=$(find /usr/local/cuda* -name "libcupti.so" -printf "%h\n" 2>/dev/null | head -1):$LD_LIBRARY_PATH
+
+# 5. Verify GPU support
+python -c "import jax; print('Devices:', jax.devices()); print('X64:', jax.config.read('jax_enable_x64'))"
 ```
 
 ### Environment Variables (CRITICAL for GPU Support)
@@ -141,13 +147,23 @@ source activate_alma.sh
 **For JAX GPU acceleration, you MUST set these environment variables BEFORE importing JAX:**
 
 ```bash
-# Method 1: Use the provided activation script (RECOMMENDED)
-source activate_alma.sh
+# Find cuPTI library (location varies by system)
+find /usr/local/cuda* -name "libcupti.so" 2>/dev/null
 
-# Method 2: Set manually
+# Set environment variables
 export LD_LIBRARY_PATH=/usr/local/cuda-12.4/extras/CUPTI/lib64:/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH
 export JAX_ENABLE_X64=1
+export CUDA_VISIBLE_DEVICES=0  # Optional: select specific GPU
 ```
+
+**Common cuPTI locations by installation type:**
+
+| Installation Type | cuPTI Location |
+|-------------------|-----------------|
+| CUDA 12.x from NVIDIA | `/usr/local/cuda-12.4/extras/CUPTI/lib64/` |
+| conda-forge cuda | `$CONDA_PREFIX/lib/` |
+| System packages | `/usr/lib/x86_64-linux-gnu/` |
+| CUDA 11.x | `/usr/local/cuda-11.x/extras/CUPTI/lib64/` |
 
 **Why this is needed:**
 - `LD_LIBRARY_PATH` with cuPTI: JAX cannot find CUDA profiling tools without this
@@ -158,17 +174,15 @@ export JAX_ENABLE_X64=1
 **For single-GPU usage (RECOMMENDED for JAXNS):**
 
 ```bash
-# Use GPU 5 (example - choose a GPU with enough free memory)
+# Check available GPUs and memory
+nvidia-smi --query-gpu=index,memory.free --format=csv
+# Look for GPUs with >4 GB free for c=300, or >2 GB for c=150
+
+# Use GPU 5 (example - choose one with enough free memory)
 export CUDA_VISIBLE_DEVICES=5
 
 # Run your fitting
 python demo/demo_2D_fitting_JAXNS.py
-```
-
-**Check available GPU memory:**
-```bash
-nvidia-smi --query-gpu=index,memory.free --format=csv
-# Look for GPUs with >4 GB free for c=300, or >2 GB for c=150
 ```
 
 **Important:** JAXNS 2.6.9 does NOT support multi-GPU parallelization. It only uses ONE GPU at a time, regardless of how many GPUs are visible. Use `CUDA_VISIBLE_DEVICES` to select which GPU to use.
@@ -186,17 +200,33 @@ python -c "import jax; print('Devices:', jax.devices()); print('X64:', jax.confi
 python -c "from jaxns import NestedSampler; print('JAXNS: OK')"
 ```
 
+**Test full pipeline:**
+```bash
+python -c "
+import dysmalpy
+import jax
+print('dysmalpy: OK')
+print('JAX devices:', jax.devices())
+print('JAX X64:', jax.config.read('jax_enable_x64'))
+"
+```
+
 ### Troubleshooting
 
 **Error: "Unable to load cuPTI"**
 ```bash
-export LD_LIBRARY_PATH=/usr/local/cuda-12.4/extras/CUPTI/lib64:/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH
+# Find cuPTI on your system
+find /usr/local/cuda* -name "libcupti.so" 2>/dev/null
+
+# Set LD_LIBRARY_PATH to the directory containing libcupti.so
+export LD_LIBRARY_PATH=/path/to/cupti/lib64:$LD_LIBRARY_PATH
 ```
 
 **Error: "JAX falls back to cpu"**
 - Check that `LD_LIBRARY_PATH` is set correctly
 - Verify CUDA installation: `nvidia-smi`
 - Check JAX version: `python -c "import jax; print(jax.__version__)"`
+- Verify cuPTI path contains `libcupti.so`
 
 **JAXNS uses wrong c value**
 - Set BOTH `num_live_points` and `c` explicitly in parameter file:
@@ -204,6 +234,22 @@ export LD_LIBRARY_PATH=/usr/local/cuda-12.4/extras/CUPTI/lib64:/usr/local/cuda-1
   num_live_points, 300
   c,                300
   ```
+
+**Git tip:** `activate_alma.sh` is NOT tracked in git as it contains machine-specific paths. Create your own local version if needed:
+
+```bash
+# Create local activation script (not in git)
+cat > ~/activate_dysmalpy.sh << 'EOF'
+#!/bin/bash
+export PYTHONNOUSERSITE=1
+export LD_LIBRARY_PATH=/usr/local/cuda-12.4/extras/CUPTI/lib64:/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH
+export JAX_ENABLE_X64=1
+conda activate alma
+EOF
+
+chmod +x ~/activate_dysmalpy.sh
+source ~/activate_dysmalpy.sh
+```
 
 See `demo/JAXNS_RUN_REPORT.md` for detailed troubleshooting guide.
 
