@@ -573,3 +573,69 @@ c, 150  # 150 parallel chains (matching num_live_points)
 
 **Note:** If `c` is not set, JAXNS 2.6.9 uses the same default (20 * D), so performance should be similar.
 However, setting `c = num_live_points` is recommended for optimal efficiency.
+
+
+---
+
+## 21. JAXNS 2.6.9 Does NOT Support Multi-GPU Parallelization
+
+**Critical Finding:** JAXNS 2.6.9's `NestedSampler` does **NOT** actually parallelize across multiple GPUs.
+
+**Symptoms:**
+- Memory allocated on all 8 GPUs (~100GB total, ~12GB per GPU)
+- BUT only 1 GPU actually computes (0-4% utilization on 1 GPU, 0% on others)
+- Slow performance despite high memory allocation
+- Log says "Using all 7/8 available GPUs" but only 1 GPU computes
+
+**Root Cause:**
+The `devices` parameter in `NestedSampler` exists but does NOT distribute computation across devices.
+It only controls where memory is allocated. JAXNS still runs on a single device at a time.
+
+**Testing:**
+```
+# Memory allocation:
+GPU 0: 24 GB allocated, 0% utilization
+GPU 1: 23 GB allocated, 0% utilization
+GPU 2: 21 GB allocated, 0% utilization
+GPU 3: 6 GB allocated, 0% utilization
+GPU 4: 4 GB allocated, 0% utilization
+GPU 5: 7 GB allocated, 0% utilization
+GPU 6: 6 GB allocated, 0% utilization
+GPU 7: 5 GB allocated, 4% utilization ← ONLY THIS GPU COMPUTES
+```
+
+**Solution:**
+Use **single GPU** with **high `c` value** (parallel Markov chains) for performance.
+
+```python
+# CORRECT: Single GPU with parallel chains
+c, 200  # 200 parallel Markov chains on 1 GPU
+CUDA_VISIBLE_DEVICES=0 python demo/demo_2D_fitting_JAXNS.py
+
+# WRONG: Multi-GPU (doesn't actually parallelize)
+# Even with devices parameter, only 1 GPU computes
+```
+
+**Comparison with JAXNS 2.4.13:**
+- JAXNS 2.4.13: `DefaultNestedSampler` with default `c=200`
+  - Single GPU, 200 parallel Markov chains
+  - Fast performance from parallel chains
+  - ~8GB GPU memory usage
+
+- JAXNS 2.6.9: `NestedSampler` with `c=150`
+  - Single GPU, 150 parallel Markov chains (if only 1 GPU visible)
+  - Same performance model as 2.4.13, but with different sampler
+  - Multi-GPU option does NOT improve performance
+
+**Key Insight:**
+- **`c` parameter** = parallel Markov chains (actual parallelization)
+- **`devices` parameter** = just memory allocation, NOT computation distribution
+- Performance comes from `c`, not from number of GPUs
+- Use `CUDA_VISIBLE_DEVICES` to select which single GPU to use
+
+**Recommendation:**
+Set `c` to match or exceed `num_live_points` for optimal efficiency:
+```python
+c, 150  # Match num_live_points=150
+c, 200  # Default (20 * 10 parameters)
+```

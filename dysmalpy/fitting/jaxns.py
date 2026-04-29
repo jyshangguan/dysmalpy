@@ -316,7 +316,6 @@ class JAXNSFitter(base.Fitter):
         self.shell_fraction = 0.5
         self.gradient_guided = False
         self.init_efficiency_threshold = 0.1
-        self.num_parallel_workers = None  # None = auto-detect (1 per GPU)
 
         # Termination conditions
         self.dlogZ = 1e-3  # evidence tolerance
@@ -460,21 +459,6 @@ class JAXNSFitter(base.Fitter):
             ns_kwargs['k'] = self.k
         if self.c is not None:
             ns_kwargs['c'] = self.c
-
-        # Set devices for multi-GPU parallelization
-        # devices=None means use all available devices (default)
-        if self.num_parallel_workers is not None and self.num_parallel_workers > 0:
-            # User specified a number of workers - use that many devices
-            import jax
-            all_devices = jax.devices()
-            num_to_use = min(self.num_parallel_workers, len(all_devices))
-            ns_kwargs['devices'] = all_devices[:num_to_use]
-            logger.info(f"JAXNS: Using {num_to_use} GPUs (user requested {self.num_parallel_workers} workers)")
-        else:
-            # Auto-detect: use all available devices
-            import jax
-            num_devices = len(jax.devices())
-            logger.info(f"JAXNS: Using all {num_devices} available GPUs")
 
         ns = NestedSampler(**ns_kwargs)
 

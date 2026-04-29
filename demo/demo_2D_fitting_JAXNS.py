@@ -9,13 +9,13 @@ The model has 10 free parameters (total_mass, r_eff_disk, fdm, sigma0,
 sigmaz, inc, pa, xshift, yshift, vel_shift — minus tied/fixed).
 
 Usage:
-    # For single GPU with parallel sampling (recommended)
+    # RECOMMENDED: Single GPU with parallel Markov chains
+    # JAXNS 2.6.9 does NOT actually parallelize across multiple GPUs
+    # The 'c' parameter (parallel Markov chains) provides the speedup, not multi-GPU
     CUDA_VISIBLE_DEVICES=0 python demo/demo_2D_fitting_JAXNS.py
 
-    # For multi-GPU with parallel sampling
-    CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python demo/demo_2D_fitting_JAXNS.py
-
-    # To control which GPUs are used, set num_parallel_workers in JAXNS_OVERRIDES below
+    # Multi-GPU does NOT improve performance - JAXNS only uses 1 GPU at a time
+    # CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python demo/demo_2D_fitting_JAXNS.py
 """
 
 import os
