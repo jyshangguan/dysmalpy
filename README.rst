@@ -48,21 +48,64 @@ Importantly, in the context of the disk framework, the velocity dispersion
 disk component (corrected for spectral and spatial resolution), which relate
 to its geometrical thickness.
 
-Dysmalpy is parametric in nature, allowing the direct fitting of the intrinsic galaxy 
-properties, exploration of mass decomposition, dark matter fractions, and 
-assessment of parameter degeneracies and associated uncertainties. This stands 
-in contrast to a non-parametric kinematic fitting approach, which requires 
-additional steps for interpreting recovered intrinsic galaxy kinematic 
+Dysmalpy is parametric in nature, allowing the direct fitting of the intrinsic galaxy
+properties, exploration of mass decomposition, dark matter fractions, and
+assessment of parameter degeneracies and associated uncertainties. This stands
+in contrast to a non-parametric kinematic fitting approach, which requires
+additional steps for interpreting recovered intrinsic galaxy kinematic
 properties.
 
-The forward modeling process involves simulating the mass distribution of a 
-galaxy, generating a 3D mock cube capturing composite kinematics, and 
-accounting for observational effects such as beam smearing and instrumental 
-line broadening. The model cube can be directly compared to the datacube in 3D, 
-but it can also be compared to 1D or 2D kinematic observations by extracting 
-the corresponding one or two-dimensional profiles following the same procedure 
-that was used on the observed data. For detailed information, refer to the 
+The forward modeling process involves simulating the mass distribution of a
+galaxy, generating a 3D mock cube capturing composite kinematics, and
+accounting for observational effects such as beam smearing and instrumental
+line broadening. The model cube can be directly compared to the datacube in 3D,
+but it can also be compared to 1D or 2D kinematic observations by extracting
+the corresponding one or two-dimensional profiles following the same procedure
+that was used on the observed data. For detailed information, refer to the
 Appendix in `Price et al. 2021`_ as well as `Lee et al. 2025`_.
+
+JAX-Accelerated Fitting
+~~~~~~~~~~~~~~~~~~~~~~~
+
+The current version (2.0+) uses JAX-accelerated computation for GPU speedup,
+supporting JAXNS nested sampling and JAX-Adam optimization. For GPU acceleration:
+
+1. Install dependencies:
+
+::
+
+   pip install jax==0.7.2 jaxlib==0.7.2
+   pip install jaxns==2.6.9 tfp-nightly
+   pip install numpy>=2.0 astropy>=6.0
+
+2. Set environment variables (REQUIRED for GPU support):
+
+::
+
+   export LD_LIBRARY_PATH=/usr/local/cuda-12.4/extras/CUPTI/lib64:/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH
+   export JAX_ENABLE_X64=1
+
+3. Activate the environment:
+
+::
+
+   source activate_alma.sh
+
+4. Run fitting:
+
+::
+
+   # For JAXNS nested sampling (recommended)
+   CUDA_VISIBLE_DEVICES=0 python demo/demo_2D_fitting_JAXNS.py
+
+   # For JAX-Adam optimization
+   CUDA_VISIBLE_DEVICES=0 python demo/demo_1D_fitting_JAXAdam.py
+
+See `demo/JAXNS_RUN_REPORT.md`_ for detailed setup instructions and troubleshooting guide.
+
+.. note:: JAXNS 2.6.9 does NOT support multi-GPU parallelization. Use ``CUDA_VISIBLE_DEVICES``
+   to select ONE GPU. Performance scales with the ``c`` parameter (parallel Markov chains),
+   NOT with multiple GPUs.
 
 .. _MPFIT: https://code.google.com/archive/p/astrolibpy
 .. _emcee: https://emcee.readthedocs.io

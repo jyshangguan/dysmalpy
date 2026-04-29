@@ -588,3 +588,149 @@ num_parallel_workers, 8  # Use 8 parallel workers (1 per GPU)
 - `dev/develop_log.md` - This entry
 
 **Commit:** TBD
+
+## 2026-04-29: JAXNS 2.6.9 Configuration and Performance Investigation
+
+### Summary
+Fixed JAXNS 2.6.9 configuration issues and documented proper setup for GPU acceleration.
+
+### Investigation
+
+**Problem:** User reported demo was slower after JAXNS upgrade and wanted to understand how to control parallelization.
+
+**Findings:**
+1. JAXNS 2.6.9's `NestedSampler` has different default behavior than 2.4.13's `DefaultNestedSampler`
+2. The `c` parameter (parallel Markov chains) is the key to performance, NOT multi-GPU usage
+3. JAXNS 2.6.9 does NOT support multi-GPU parallelization - only uses 1 GPU at a time
+4. cuPTI library path must be set for JAX to initialize GPU correctly
+
+### Changes Made
+
+**1. Fixed JAXNS Configuration (`demo/demo_2D_fitting_JAXNS.py`)**
+```python
+# Before (incorrect - only set num_live_points)
+num_live_points, 150
+c, 150      # comment on same line breaks parser
+
+# After (correct - both set explicitly)
+num_live_points, 300
+c,                300
+```
+
+**2. Fixed cuPTI Library Path (`activate_alma.sh`)**
+```bash
+# Added this line:
+export LD_LIBRARY_PATH=/usr/local/cuda-12.4/extras/CUPTI/lib64:/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH
+```
+
+**3. Added Debug Logging (`dysmalpy/fitting/jaxns.py`)**
+```python
+logger.info(f"JAXNS: Creating NestedSampler with c={self.c}")
+logger.info(f"JAXNS: ns_kwargs keys: {list(ns_kwargs.keys())}")
+logger.info(f"JAXNS: NestedSampler created successfully")
+logger.info(f"JAXNS: Starting ns() call...")
+```
+
+### Performance Results
+
+**Configuration:**
+- JAXNS Version: 2.6.9
+- Sampler: `NestedSampler`
+- `c = 300` (parallel Markov chains)
+- `num_live_points = 300`
+- `dlogZ = 0.1` (termination criterion)
+
+**Results:**
+- Wall-clock time: 1790.41 seconds (29.8 minutes)
+- JAXNS sampling: 1764.3 seconds (29.4 minutes)
+- Peak GPU memory: ~24 GB (98% of 24.5 GB)
+- Evidence: log(Z) = -46.0593 ± 0.2835
+- Reduced χ²: 4.7442
+
+### Key Insights
+
+**1. JAXNS Parallelization is Single-GPU**
+- `c` parameter controls parallel Markov chains on ONE GPU
+- JAXNS 2.6.9 does NOT distribute computation across multiple GPUs
+- Multi-GPU setup does NOT improve performance
+- `CUDA_VISIBLE_DEVICES=N` should be used to select ONE GPU
+
+**2. Memory vs Performance Trade-off**
+- `c=300`: ~24 GB, ~30 minutes (optimal)
+- `c=150`: ~12 GB, ~60 minutes (2x slower)
+- `c=75`: ~6 GB, ~120 minutes (4x slower)
+
+**3. JAXNS 2.6.9 Parameter Relationship**
+```
+num_live_points = c × (k + 1)
+
+Where:
+- c = parallel Markov chains
+- k = phantom samples (default 0)
+```
+
+**Best practice:** Set BOTH explicitly to avoid confusion:
+```python
+num_live_points, 300
+c,                300
+```
+
+**4. Environment Setup is Critical**
+```bash
+# Required for JAX GPU support:
+export LD_LIBRARY_PATH=/usr/local/cuda-12.4/extras/CUPTI/lib64:/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH
+
+# Activate conda environment:
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate alma
+
+# Select GPU:
+export CUDA_VISIBLE_DEVICES=5
+
+# Run with unbuffered output:
+python -u demo/demo_2D_fitting_JAXNS.py
+```
+
+### Documentation
+
+Created comprehensive guide: `demo/JAXNS_RUN_REPORT.md`
+- Complete setup instructions
+- Troubleshooting guide
+- Performance optimization tips
+- Parameter explanations
+- Verification commands
+
+### Testing
+
+**Tested on:**
+- GPU: NVIDIA GeForce RTX 4090 (24.5 GB)
+- CUDA: 12.4
+- JAX: 0.7.2
+- JAXNS: 2.6.9
+- Python: 3.11 (alma conda environment)
+
+**Verification:**
+- Single GPU usage confirmed (only GPU 5 allocated memory)
+- Progress output working with `python -u`
+- All output files generated correctly
+- Results reproducible (multiple runs gave similar log(Z))
+
+### Files Modified
+
+1. `demo/demo_2D_fitting_JAXNS.py` - Fixed c parameter configuration
+2. `activate_alma.sh` - Added cuPTI library path
+3. `dysmalpy/fitting/jaxns.py` - Added debug logging
+4. `demo/JAXNS_RUN_REPORT.md` - Created comprehensive documentation
+5. `dev/problem.md` - Added Problems #22-25
+6. `dev/develop_log.md` - This entry
+
+### Commits
+
+- `d451f82` - Fix JAXNS 2.6.9 configuration and add cuPTI library path
+
+### References
+
+- [JAXNS 2.6.9 Documentation](https://jaxns.readthedocs.io/en/latest/api/jaxns/index.html)
+- [JAX GPU Installation](https://jax.readthedocs.io/en/latest/installation.html#gpu-support)
+- `demo/JAXNS_RUN_REPORT.md` - Detailed setup and troubleshooting guide
+

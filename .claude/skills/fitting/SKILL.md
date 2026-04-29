@@ -9,15 +9,71 @@ description: >
 
 # Running and Debugging Fits
 
+## Environment Setup (CRITICAL for JAX-based fitters)
+
+**Before running any JAX-based fitting (JAXNS, JAXAdam):**
+
+```bash
+# 1. Set cuPTI library path for GPU support
+export LD_LIBRARY_PATH=/usr/local/cuda-12.4/extras/CUPTI/lib64:/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH
+
+# 2. Activate conda environment
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate alma
+
+# OR use the provided script
+source activate_alma.sh
+```
+
+**To select a specific GPU:**
+
+```bash
+# Use GPU 5 (example - choose one with enough free memory)
+export CUDA_VISIBLE_DEVICES=5
+```
+
+**Check GPU memory:**
+
+```bash
+nvidia-smi --query-gpu=index,memory.free --format=csv
+# Need >4 GB for c=300, >2 GB for c=150, >1 GB for c=75
+```
+
+**Verification:**
+
+```bash
+python -c "import jax; print('Devices:', jax.devices()); print('X64:', jax.config.read('jax_enable_x64'))"
+# Should show: Devices: [CudaDevice(id=0)...], X64: True
+```
+
 ## Fitter Classes
 
-| Fitter | Module | Backend | Use case |
-|--------|--------|---------|----------|
-| `MPFITFitter` | `fitting/mpfit.py` | Levenberg-Marquardt | Fast local optimization, good initial guess |
-| `MCMCFitter` | `fitting/mcmc.py` | emcee | Posterior sampling, handles multimodal landscapes |
-| `NestedFitter` | `fitting/nested_sampling.py` | MultiNest | Bayesian evidence computation |
-| `JAXNSFitter` | `fitting/jaxns.py` | jaxns | JAX-native nested sampling, GPU-accelerated |
-| `JAXAdamFitter` | `fitting/jax_optimize.py` | Adam | JAX-native gradient descent |
+| Fitter | Module | Backend | Use case | GPU Memory | Time |
+|--------|--------|---------|----------|------------|------|
+| `MPFITFitter` | `fitting/mpfit.py` | Levenberg-Marquardt | Fast local optimization, good initial guess | N/A | ~minutes |
+| `MCMCFitter` | `fitting/mcmc.py` | emcee | Posterior sampling, handles multimodal landscapes | N/A | ~hours |
+| `NestedFitter` | `fitting/nested_sampling.py` | MultiNest | Bayesian evidence computation | N/A | ~hours |
+| `JAXNSFitter` | `fitting/jaxns.py` | jaxns | JAX-native nested sampling, GPU-accelerated | ~24 GB (c=300) | ~30 min |
+| `JAXAdamFitter` | `fitting/jax_optimize.py` | Adam | JAX-native gradient descent | ~8 GB | ~10 min |
+
+**JAXNS Performance Scaling:**
+
+| c value | num_live_points | Memory | Time (approx) |
+|---------|-----------------|--------|---------------|
+| 300 | 300 | ~24 GB | 30 min (recommended) |
+| 150 | 150 | ~12 GB | 60 min |
+| 75 | 75 | ~6 GB | 120 min |
+
+**Important:** Set BOTH `num_live_points` and `c` explicitly in parameter files:
+
+```python
+# CORRECT
+num_live_points, 300
+c,                300
+
+# WRONG - only sets c, JAXNS calculates num_live_points
+c, 300  # Results in c = num_live_points / (k + 1) = 150 if k=0
+```
 
 ## High-Level API
 

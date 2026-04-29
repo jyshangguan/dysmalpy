@@ -639,3 +639,119 @@ Set `c` to match or exceed `num_live_points` for optimal efficiency:
 c, 150  # Match num_live_points=150
 c, 200  # Default (20 * 10 parameters)
 ```
+
+# Problem #22: JAXNS 2.6.9 parameter file comment parsing
+
+**Date:** 2026-04-29
+
+**Issue:** Inline comments in parameter files break the parser
+
+**Symptoms:**
+```python
+# WRONG - parser reads "300      # comment" as string
+c, 300      # 300 parallel chains
+```
+
+**Root Cause:** The parameter file parser splits on the first comma and takes everything after as the value, including inline comments.
+
+**Fix:** Put comments on separate lines
+```python
+# CORRECT
+c, 300
+# c=300 gives 300 parallel Markov chains (30*n_dim for 10 params)
+```
+
+**Files Affected:** 
+- `demo/demo_2D_fitting_JAXNS.py`
+
+**Impact:** If using inline comments, the value becomes a string instead of integer, causing JAXNS to ignore it or crash.
+
+---
+
+# Problem #23: JAXNS 2.6.9 c parameter override behavior
+
+**Date:** 2026-04-29
+
+**Issue:** Setting only `c` parameter doesn't work as expected in JAXNS 2.6.9
+
+**Symptoms:**
+- Setting `c=300` results in JAXNS using `c=150`
+- Setting `num_live_points=150` results in `c=150`
+- Log shows "Number of Markov-chains set to: 150" instead of 300
+
+**Root Cause:** JAXNS 2.6.9 `NestedSampler` calculates one from the other:
+- If `num_live_points=X` is set, JAXNS calculates `c = X / (k + 1)` where `k=0` by default
+- If `c=X` is set (and `num_live_points=None`), JAXNS calculates `num_live_points = X * (k + 1)`
+- If BOTH are set, JAXNS uses the explicit values
+
+**Fix:** Always set both `num_live_points` and `c` explicitly when you want a specific value:
+```python
+num_live_points, 300
+c,                300
+```
+
+**Difference from JAXNS 2.4.13:**
+- Old: `DefaultNestedSampler` defaulted to `c = 30 * n_dim`
+- New: `NestedSampler` defaults to `c * (k + 1)` for num_live_points
+
+**Files Affected:**
+- `dysmalpy/fitting/jaxns.py`
+- `demo/demo_2D_fitting_JAXNS.py`
+
+---
+
+# Problem #24: cuPTI library not found error
+
+**Date:** 2026-04-29
+
+**Issue:** JAX fails to initialize GPU with error:
+```
+RuntimeError: Unable to load cuPTI. Is it installed?
+```
+
+**Symptoms:**
+- JAX falls back to CPU mode
+- GPU memory not allocated
+- Nested sampling extremely slow
+
+**Root Cause:** cuPTI (CUDA Profiling Tools Interface) library path not in `LD_LIBRARY_PATH`
+
+**Fix:** Add cuPTI library path before importing JAX:
+```bash
+export LD_LIBRARY_PATH=/usr/local/cuda-12.4/extras/CUPTI/lib64:/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH
+```
+
+**Location:** Added to `activate_alma.sh` to be set automatically on environment activation
+
+**Files Affected:**
+- `activate_alma.sh`
+
+**Impact:** Without this fix, JAX cannot use GPU even if CUDA is installed correctly.
+
+---
+
+# Problem #25: JAXNS 2.6.9 progress output buffering
+
+**Date:** 2026-04-29
+
+**Issue:** JAXNS progress output doesn't appear when running in background
+
+**Symptoms:**
+- Demo appears to hang at "Running nested sampling..."
+- No progress output for hours
+- Output only appears at completion
+
+**Root Cause:** Python stdout buffering when running in background with `&`
+
+**Fix:** Use `python -u` flag for unbuffered output:
+```bash
+python -u demo/demo_2D_fitting_JAXNS.py
+```
+
+**Alternative:** Run in foreground or use `| tee` to capture output while also seeing it
+
+**Files Affected:**
+- `demo/JAXNS_RUN_REPORT.md` (documentation)
+
+**Impact:** Without `-u` flag, users cannot monitor progress and may think the job is stuck.
+

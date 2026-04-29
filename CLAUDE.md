@@ -90,8 +90,8 @@ Key differences from the original (`dysmalpy_origin`) to current (`main`):
 
 | Item | Value |
 |------|-------|
-| Conda env | `dysmalpy-jax` |
-| GPU | NVIDIA 4090 (CUDA 12) |
+| Conda env | `alma` |
+| GPU | NVIDIA 4090 (CUDA 12.4) |
 | JAX backend | **GPU by default** for JAXNS/Adam fitting (use `JAX_PLATFORMS=cpu` only for MCMC multiprocessing issues) |
 | Float64 | `JAX_ENABLE_X64=1` set in `__init__.py` (must be before any JAX import) |
 
@@ -110,6 +110,102 @@ JAXNS 2.6.9 uses `NestedSampler` (dynamic nested sampling), not `DefaultNestedSa
 JAX, jaxlib, and downstream packages (jaxns, tfp-nightly) must be
 pinned together.  A version mismatch causes hard-to-diagnose import errors or
 segfaults.
+
+---
+
+## Installation and Setup
+
+### Quick Start
+
+```bash
+# 1. Clone the repository
+git clone <repository_url>
+cd dysmalpy
+
+# 2. Create conda environment (if using alma environment)
+conda create -n alma python=3.11
+conda activate alma
+
+# 3. Install dependencies
+pip install jax==0.7.2 jaxlib==0.7.2
+pip install jaxns==2.6.9 tfp-nightly
+pip install numpy>=2.0 astropy>=6.0 matplotlib scipy
+pip install -e .
+
+# 4. Set up environment (REQUIRED for GPU support)
+source activate_alma.sh
+```
+
+### Environment Variables (CRITICAL for GPU Support)
+
+**For JAX GPU acceleration, you MUST set these environment variables BEFORE importing JAX:**
+
+```bash
+# Method 1: Use the provided activation script (RECOMMENDED)
+source activate_alma.sh
+
+# Method 2: Set manually
+export LD_LIBRARY_PATH=/usr/local/cuda-12.4/extras/CUPTI/lib64:/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH
+export JAX_ENABLE_X64=1
+```
+
+**Why this is needed:**
+- `LD_LIBRARY_PATH` with cuPTI: JAX cannot find CUDA profiling tools without this
+- `JAX_ENABLE_X64=1`: Prevents JAX from defaulting to float32 (must be set before `import jax`)
+
+### Selecting a GPU
+
+**For single-GPU usage (RECOMMENDED for JAXNS):**
+
+```bash
+# Use GPU 5 (example - choose a GPU with enough free memory)
+export CUDA_VISIBLE_DEVICES=5
+
+# Run your fitting
+python demo/demo_2D_fitting_JAXNS.py
+```
+
+**Check available GPU memory:**
+```bash
+nvidia-smi --query-gpu=index,memory.free --format=csv
+# Look for GPUs with >4 GB free for c=300, or >2 GB for c=150
+```
+
+**Important:** JAXNS 2.6.9 does NOT support multi-GPU parallelization. It only uses ONE GPU at a time, regardless of how many GPUs are visible. Use `CUDA_VISIBLE_DEVICES` to select which GPU to use.
+
+### Verification
+
+**Test JAX GPU support:**
+```bash
+python -c "import jax; print('Devices:', jax.devices()); print('X64:', jax.config.read('jax_enable_x64'))"
+# Should show: Devices: [CudaDevice(id=0)...], X64: True
+```
+
+**Test JAXNS:**
+```bash
+python -c "from jaxns import NestedSampler; print('JAXNS: OK')"
+```
+
+### Troubleshooting
+
+**Error: "Unable to load cuPTI"**
+```bash
+export LD_LIBRARY_PATH=/usr/local/cuda-12.4/extras/CUPTI/lib64:/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH
+```
+
+**Error: "JAX falls back to cpu"**
+- Check that `LD_LIBRARY_PATH` is set correctly
+- Verify CUDA installation: `nvidia-smi`
+- Check JAX version: `python -c "import jax; print(jax.__version__)"`
+
+**JAXNS uses wrong c value**
+- Set BOTH `num_live_points` and `c` explicitly in parameter file:
+  ```
+  num_live_points, 300
+  c,                300
+  ```
+
+See `demo/JAXNS_RUN_REPORT.md` for detailed troubleshooting guide.
 
 ## Key Classes
 
