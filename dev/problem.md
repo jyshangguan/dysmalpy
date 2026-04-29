@@ -828,3 +828,107 @@ if output_options.f_log is not None:
 - Audit trail of fitting process
 - Monitoring progress without console access
 
+---
+
+# Problem #27: pip install -e . fails with Cython compilation errors
+
+**Date:** 2026-04-29
+
+**Issue:** Installation with `pip install -e .` fails for JAX version when Cython not installed
+
+**Symptoms:**
+```
+Building editable for dysmalpy (pyproject.toml) ... error
+exit code: 1
+INFO:root:building 'dysmalpy.models.cutils' extension
+gcc: command failed with exit code 1
+error: Failed building editable for dysmalpy
+```
+
+**Root Cause:** Three separate issues preventing JAX-only installation:
+
+1. **pyproject.toml requires Cython in build-system**
+   ```toml
+   requires = ["setuptools", 'wheel', 'Cython']  # Cython mandatory!
+   ```
+
+2. **setup.py has mandatory Cython import**
+   ```python
+   from Cython.Build import cythonize  # Fails if Cython not installed!
+   ```
+
+3. **cutils extension not marked as optional**
+   ```python
+   Extension("dysmalpy.models.cutils",
+           sources=["dysmalpy/models/cutils.pyx"],
+           # No optional=True!
+           )
+   ```
+
+**Fix:** Make Cython optional throughout build system:
+
+**1. pyproject.toml - Remove Cython requirement:**
+```toml
+# Before
+requires = ["setuptools", 'wheel', 'Cython']
+
+# After
+requires = ["setuptools", 'wheel']  # Cython optional
+```
+
+**2. setup.py - Make Cython import optional:**
+```python
+# Before
+from Cython.Build import cythonize
+
+# After
+try:
+    from Cython.Build import cythonize
+    HAS_CYTHON = True
+except ImportError:
+    HAS_CYTHON = False
+    print("Note: Cython not installed. JAX-only installation...")
+```
+
+**3. setup.py - Make extensions optional and skip compilation:**
+```python
+# Add optional=True to extension
+Extension("dysmalpy.models.cutils",
+        sources=["dysmalpy/models/cutils.pyx"],
+        optional=True,  # Make optional!
+        )
+
+# Skip all extensions when Cython unavailable
+if HAS_CYTHON and os.path.exists("dysmalpy/models/cutils.pyx"):
+    ext_modules = cythonize(original_ext_modules, annotate=True)
+else:
+    print("Installing without Cython extensions (JAX-only mode)")
+    ext_modules = []
+```
+
+**Result:** Installation now works with simple:
+```bash
+conda create -n dysmalpy python=3.11
+conda activate dysmalpy
+pip install -e .  # Works without Cython!
+```
+
+**Files Affected:**
+- `pyproject.toml` (removed Cython from build-system requires)
+- `setup.py` (made Cython import optional, added optional=True to extensions)
+- `setup.cfg` (updated dependency notes)
+- `README.rst` (added Quick Start installation section)
+
+**Impact:** Users can now install JAX version with standard `pip install -e .` workflow,
+no manual Cython installation or complex dependency management required.
+
+**Testing:**
+- ✅ Fresh conda environment created
+- ✅ `pip install -e .` succeeded without Cython
+- ✅ All core imports work (Galaxy, ModelSet, Observation)
+- ✅ JAX integration verified (JAX 0.7.2, JAXNS 2.6.9)
+
+**Key Insight:** The JAX version doesn't need Cython (uses JAX instead of cutils.pyx),
+but the build system was still configured for the old Cython-based version. Making Cython
+optional throughout allows simple `pip install -e .` installation.
+

@@ -203,7 +203,18 @@ All dependencies are automatically installed with ``pip install -e .``.
 Installation
 ------------
 
-Dysmalpy has two installation options:
+Dysmalpy has two installation options. The **JAX-accelerated version** is the current
+main branch and provides GPU acceleration with modern Bayesian fitting methods.
+
+**Quick Start (JAX version, 3 commands):**
+
+::
+
+   conda create -n dysmalpy python=3.11
+   conda activate dysmalpy
+   pip install -e .
+
+That's it! All dependencies (JAX, JAXNS, fitting backends) are installed automatically.
 
 **Option 1: JAX-accelerated version (current main branch, experimental)**
 
@@ -213,19 +224,31 @@ The JAX version provides GPU acceleration and modern Bayesian fitting methods::
    conda create -n dysmalpy python=3.11
    conda activate dysmalpy
 
-   # Install with pip (recommended)
+   # Install with pip (all dependencies installed automatically)
    pip install -e .
 
-   # For GPU support, set environment variables BEFORE importing JAX:
+   # Verify installation
+   python -c "import dysmalpy; import jax; print(f'dysmalpy: {dysmalpy.__version__}, JAX: {jax.__version__}')"
+
+**For GPU support** (optional but recommended for JAXNS fitting):
+
+Set these environment variables **before** importing JAX::
+
+   # Find cuPTI library (location varies by system)
+   find /usr/local/cuda* -name "libcupti.so" 2>/dev/null
+
+   # Set environment variables (adjust path for your system)
    export LD_LIBRARY_PATH=/usr/local/cuda-12.4/extras/CUPTI/lib64:/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH
    export JAX_ENABLE_X64=1
    export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
-   # Verify installation
-   python -c "import dysmalpy; print(dysmalpy.__version__)"
+   # Select GPU (optional - choose one with enough free memory)
+   export CUDA_VISIBLE_DEVICES=0
 
-This will install all dependencies including JAX, JAXNS, and fitting backends.
-See `JAX-Accelerated Fitting`_ section below for GPU setup details.
+   # Verify GPU support
+   python -c "import jax; print('GPU available:', len(jax.devices()) > 0 and 'cuda' in str(jax.devices()[0]))"
+
+See `JAX-Accelerated Fitting`_ section below for detailed GPU setup and troubleshooting.
 
 **Option 2: Cython-based version (stable, for production use)**
 
