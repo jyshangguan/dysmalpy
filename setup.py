@@ -161,11 +161,12 @@ symbols_leastChiSquares1D = ["GlobalDebug", "isLittleEndian", "setGlobalDebugLev
 
 # Only the mandatory modules
 original_ext_modules = [
-        # Basic modules
+        # Basic modules (Cython - optional for JAX version)
         Extension("dysmalpy.models.cutils",
-                sources=["dysmalpy/models/cutils.pyx"],   
+                sources=["dysmalpy/models/cutils.pyx"],
                 include_dirs=include_dirs,
                 library_dirs=library_dirs,
+                optional=True,  # Make optional for JAX-only installation
                 ),
         # Lensing transformer
         Extension("dysmalpy.lensingTransformer",
@@ -196,9 +197,12 @@ original_ext_modules = [
 
 # Cythonize the extensions only if Cython is available
 if HAS_CYTHON and os.path.exists("dysmalpy/models/cutils.pyx"):
+    print("Building with Cython extensions...")
     ext_modules = cythonize(original_ext_modules, annotate=True)
 else:
     print("Installing without Cython extensions (JAX-only mode)")
+    print("Cython extensions (cutils, lensing, chi-squared) will be skipped.")
+    # Filter out ALL extensions when Cython is not available
     ext_modules = []
 
 class BuildExtCommand(build_ext):
