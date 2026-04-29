@@ -372,7 +372,7 @@ The fitting run produces the following files in `demo/demo_2D_output_jaxns/`:
 
 **Demo timing (GS4_43501 on 8-GPU server):**
 - **JAXNS:** 343.8 s (5.7 min) with `c=150`, `num_live_points=150`
-- **Hardware:** Server with 8 GPUs available (JAXNS uses 1 GPU at a time)
+- **Hardware:** Server with 8 GPUs available 
 
 The JAXNS fit achieves a substantially lower reduced chi-squared (4.74 vs. 11.92 for MPFIT)
 by fitting all 10 free parameters including the 5 geometry parameters (inc, pa, xshift,
