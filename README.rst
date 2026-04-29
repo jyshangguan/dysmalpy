@@ -123,7 +123,7 @@ supporting JAXNS nested sampling and JAX-Adam optimization. For GPU acceleration
    to select ONE GPU. Performance scales with the ``c`` parameter (parallel Markov chains),
    NOT with multiple GPUs.
 
-**See** `demo/JAXNS_RUN_REPORT.md`_ **for detailed setup instructions and troubleshooting guide.**
+**See** [`demo/JAXNS_RUN_REPORT.md`](https://github.com/jyshangguan/dysmalpy/blob/main/demo/demo_2D_fitting_JAXNS.md) **for detailed setup instructions and troubleshooting guide.**
 
 .. _MPFIT: https://code.google.com/archive/p/astrolibpy
 .. _emcee: https://emcee.readthedocs.io
