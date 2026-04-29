@@ -585,7 +585,9 @@ maxiter,         200       # Maximum number of iterations before mpfit quits
 
 # ----- JAXNS overrides (appended to MPFIT template) -----
 fit_method,      jaxns
-num_live_points, 150
+num_live_points, 300
+c,                300
+# c=300 gives 300 parallel Markov chains (30*n_dim for 10 params), matching old JAXNS 2.4.13 default
 dlogZ,            0.1
 oversampled_chisq, True
 verbose,          True

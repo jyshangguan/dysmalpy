@@ -755,3 +755,76 @@ python -u demo/demo_2D_fitting_JAXNS.py
 
 **Impact:** Without `-u` flag, users cannot monitor progress and may think the job is stuck.
 
+---
+
+# Problem #26: JAXNS log file missing progress output
+
+**Date:** 2026-04-29
+
+**Issue:** JAXNS log file (`GS4_43501_jaxns.log`) was missing all progress information
+
+**Symptoms:**
+- Log file only contained initial setup messages
+- Missing progress updates (samples, efficiency, log(Z) estimates)
+- No completion information
+- Console showed progress but log file didn't
+
+**Root Cause:** JAXNS has **two** output streams:
+1. **DysmalPy logger messages** → Captured by FileHandler ✅
+2. **JAXNS progress output** → Goes to stdout/JAXNS logger, NOT captured ❌
+
+JAXNS uses:
+- `jax.debug.print()` for sampling progress (goes to stdout)
+- `logging.getLogger('jaxns')` for setup messages (separate logger)
+
+**Fix:** Two-part solution in `dysmalpy/fitting/jaxns.py`:
+
+1. **Add JAXNS logger handler** (line 397-401):
+```python
+# Also capture JAXNS logger output
+jaxns_logger = logging.getLogger('jaxns')
+jaxns_handler = logging.FileHandler(output_options.f_log)
+jaxns_handler.setLevel(logging.INFO)
+jaxns_logger.addHandler(jaxns_handler)
+```
+
+2. **Redirect stdout during ns() call** (line 476-497):
+```python
+# Capture stdout/stderr to log file during ns() call
+# JAXNS uses jax.debug.print() for progress, which requires stdout redirection
+if output_options.f_log is not None:
+    # Open file with line buffering to ensure jax.debug.print() output is captured promptly
+    with open(output_options.f_log, 'a', buffering=1) as f:
+        # Redirect both stdout and stderr
+        original_stdout = sys.stdout
+        original_stderr = sys.stderr
+        sys.stdout = f
+        sys.stderr = f
+
+        try:
+            # Run with output captured
+            termination_reason, state = ns(
+                jax.random.PRNGKey(42),
+                term_cond=term_cond
+            )
+        finally:
+            # Restore stdout/stderr
+            sys.stdout = original_stdout
+            sys.stderr = original_stderr
+```
+
+**Result:** Log file now contains:
+- "Number of Markov-chains set to: 300"
+- "Creating initial state with 300 live points."
+- "Running uniform sampling down to efficiency threshold of 0.1."
+- Multiple progress updates with Num samples, Efficiency, log(Z) estimates, etc.
+
+**Files Affected:**
+- `dysmalpy/fitting/jaxns.py` (added sys import, JAXNS logger handler, stdout redirection)
+
+**Impact:** Users can now review complete fitting progress in log file, essential for:
+- Debugging failed runs
+- Performance analysis
+- Audit trail of fitting process
+- Monitoring progress without console access
+

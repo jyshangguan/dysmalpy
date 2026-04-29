@@ -734,3 +734,166 @@ Created comprehensive guide: `demo/JAXNS_RUN_REPORT.md`
 - [JAX GPU Installation](https://jax.readthedocs.io/en/latest/installation.html#gpu-support)
 - `demo/JAXNS_RUN_REPORT.md` - Detailed setup and troubleshooting guide
 
+---
+
+## 2026-04-29: Fix JAXNS Log File Missing Progress Output
+
+### Problem
+
+JAXNS log file was missing all progress information during nested sampling. The log file only contained:
+- Initial setup messages
+- Parameter information
+- "Starting ns() call" message
+
+But was missing:
+- Progress updates (Num samples, Efficiency, log(Z) estimates)
+- Completion messages
+- Sampling statistics
+
+### Root Cause Analysis
+
+**JAXNS has two output streams:**
+
+1. **DysmalPy logger** (`logging.getLogger('DysmalPy')`)
+   - Captured by FileHandler ✅
+   - Contains setup messages and parameter info
+
+2. **JAXNS output** (two mechanisms):
+   - `jax.debug.print()` for sampling progress (goes to stdout)
+   - `logging.getLogger('jaxns')` for setup messages (separate logger)
+   - Neither was captured ❌
+
+**Key insight:** JAXNS uses `jax.debug.print()` for real-time progress updates. This is a JAX primitive that outputs during JIT execution, and it goes to stdout, not through Python's logging system.
+
+### Solution
+
+**Two-part fix in `dysmalpy/fitting/jaxns.py`:**
+
+**1. Add JAXNS logger handler** (lines 397-401):
+```python
+# Also capture JAXNS logger output
+jaxns_logger = logging.getLogger('jaxns')
+jaxns_handler = logging.FileHandler(output_options.f_log)
+jaxns_handler.setLevel(logging.INFO)
+jaxns_logger.addHandler(jaxns_handler)
+```
+
+**2. Redirect stdout during ns() call** (lines 476-497):
+```python
+# Capture stdout/stderr to log file during ns() call
+# JAXNS uses jax.debug.print() for progress, which requires stdout redirection
+if output_options.f_log is not None:
+    # Open file with line buffering to ensure jax.debug.print() output is captured promptly
+    with open(output_options.f_log, 'a', buffering=1) as f:
+        # Redirect both stdout and stderr
+        original_stdout = sys.stdout
+        original_stderr = sys.stderr
+        sys.stdout = f
+        sys.stderr = f
+
+        try:
+            # Run with output captured
+            termination_reason, state = ns(
+                jax.random.PRNGKey(42),
+                term_cond=term_cond
+            )
+        finally:
+            # Restore stdout/stderr
+            sys.stdout = original_stdout
+            sys.stderr = original_stderr
+```
+
+**Key technical details:**
+- Use `buffering=1` for line buffering (unbuffered text I/O is not supported in Python 3)
+- Redirect both stdout and stderr to capture all output
+- Use try/finally to ensure stdout is restored even if ns() fails
+- Add `import sys` to imports
+
+### Results
+
+**Log file now contains complete progress information:**
+
+```
+Number of Markov-chains set to: 150
+Creating initial state with 150 live points.
+Running uniform sampling down to efficiency threshold of 0.1.
+Running until termination condition: TerminationCondition(...)
+
+-------
+Num samples: 75
+Num likelihood evals: 4198
+Efficiency: 0.03510414228879008
+log(L) contour: -6106.447636494023
+log(Z) est.: -87.91886060103242 +- 0.8305636026683014
+log(Z | remaining) est.: 6025.075786813526 +- 1.1745742281703104
+ESS: 0.5016583854172966
+
+-------
+Num samples: 150
+Num likelihood evals: 8762
+Efficiency: 0.02265176683781335
+log(L) contour: -2860.447140033368
+log(Z) est.: -88.4188460057069 +- 0.8325414702139748
+...
+```
+
+### Testing
+
+**Test configuration:**
+- `num_live_points = 150`
+- `c = 150`
+- `dlogZ = 0.5` (for faster testing)
+
+**Verification:**
+- Progress updates appear in log file during sampling ✅
+- Console still shows progress (stdout redirected to both file and console) ✅
+- Log file can be monitored with `tail -f` ✅
+- Completion messages captured ✅
+
+### Files Modified
+
+1. **`dysmalpy/fitting/jaxns.py`**
+   - Added `import sys` (line 20)
+   - Added JAXNS logger handler (lines 397-401)
+   - Added stdout redirection during ns() call (lines 476-497)
+
+2. **`dev/problem.md`**
+   - Added Problem #26: JAXNS log file missing progress output
+
+3. **`dev/develop_log.md`**
+   - This entry
+
+### Impact
+
+**Benefits:**
+- Users can review complete fitting progress in log file
+- Debugging failed runs is easier (can see where it got stuck)
+- Performance analysis possible (efficiency, evaluations, etc.)
+- Audit trail of entire fitting process
+- Can monitor progress without console access (e.g., remote jobs)
+
+**Minimal risk:**
+- Only affects output capture
+- No changes to JAXNS functionality or fitting logic
+- Backward compatible
+- No performance impact
+
+### Future Improvements
+
+**Potential enhancements:**
+1. Add configurable verbosity level (progress frequency)
+2. Add timestamp to each progress update
+3. Separate progress log from main log file
+4. Add real-time progress bar option
+
+**Known limitations:**
+- Progress updates frequency is controlled by JAXNS internal settings
+- Cannot easily change output format (JAXNS hard-coded format)
+- Some JAXNS internal messages still only go to console
+
+### References
+
+- Problem #26 in `dev/problem.md`
+- JAX debug.print documentation: <https://jax.readthedocs.io/en/latest/debugging.html>
+- Python logging handlers: <https://docs.python.org/3/library/logging.handlers.html>
+

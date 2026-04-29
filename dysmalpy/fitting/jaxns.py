@@ -17,6 +17,7 @@ from __future__ import (absolute_import, division, print_function,
 
 ## Standard library
 import logging
+import sys
 
 # DYSMALPY code
 from dysmalpy.data_io import load_pickle, dump_pickle
@@ -387,9 +388,16 @@ class JAXNSFitter(base.Fitter):
 
         # Setup file redirect logging
         if output_options.f_log is not None:
+            # Capture DysmalPy logger output
             loggerfile = logging.FileHandler(output_options.f_log)
             loggerfile.setLevel(logging.INFO)
             logger.addHandler(loggerfile)
+
+            # Also capture JAXNS logger output
+            jaxns_logger = logging.getLogger('jaxns')
+            jaxns_handler = logging.FileHandler(output_options.f_log)
+            jaxns_handler.setLevel(logging.INFO)
+            jaxns_logger.addHandler(jaxns_handler)
 
         # ++++++++++++++++++++++++++++++++
         # Build JAX-traceable log-likelihood
@@ -466,14 +474,37 @@ class JAXNSFitter(base.Fitter):
 
         logger.info(f"JAXNS: NestedSampler created successfully")
         logger.info(f"JAXNS: Running nested sampling...")
+        logger.info(f"JAXNS: Starting ns() call with term_cond={term_cond}")
         t0 = time.time()
 
-        # Run
-        logger.info(f"JAXNS: Starting ns() call with term_cond={term_cond}")
-        termination_reason, state = ns(
-            jax.random.PRNGKey(42),
-            term_cond=term_cond
-        )
+        # Capture stdout/stderr to log file during ns() call
+        # JAXNS uses jax.debug.print() for progress, which requires stdout redirection
+        if output_options.f_log is not None:
+            # Open file with line buffering to ensure jax.debug.print() output is captured promptly
+            with open(output_options.f_log, 'a', buffering=1) as f:
+                # Redirect both stdout and stderr
+                original_stdout = sys.stdout
+                original_stderr = sys.stderr
+                sys.stdout = f
+                sys.stderr = f
+
+                try:
+                    # Run with output captured
+                    termination_reason, state = ns(
+                        jax.random.PRNGKey(42),
+                        term_cond=term_cond
+                    )
+                finally:
+                    # Restore stdout/stderr
+                    sys.stdout = original_stdout
+                    sys.stderr = original_stderr
+        else:
+            # Run without capture
+            termination_reason, state = ns(
+                jax.random.PRNGKey(42),
+                term_cond=term_cond
+            )
+
         logger.info(f"JAXNS: ns() call completed")
 
         # Convert to results
