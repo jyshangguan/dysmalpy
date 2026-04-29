@@ -20,6 +20,7 @@ find /usr/local/cuda* -name "libcupti.so" 2>/dev/null
 # 2. Set environment variables (adjust path for your system)
 export LD_LIBRARY_PATH=/usr/local/cuda-12.4/extras/CUPTI/lib64:/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH
 export JAX_ENABLE_X64=1
+export XLA_PYTHON_CLIENT_PREALLOCATE=false  # Allow dynamic GPU memory allocation
 
 # 3. Activate conda environment
 source ~/miniconda3/etc/profile.d/conda.sh
@@ -32,9 +33,9 @@ conda activate alma
 # Create ~/activate_dysmalpy.sh with your system-specific paths
 cat > ~/activate_dysmalpy.sh << 'EOF'
 #!/bin/bash
-export PYTHONNOUSERSITE=1
 export LD_LIBRARY_PATH=/usr/local/cuda-12.4/extras/CUPTI/lib64:/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH
 export JAX_ENABLE_X64=1
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate alma
 EOF

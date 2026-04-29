@@ -88,6 +88,9 @@ supporting JAXNS nested sampling and JAX-Adam optimization. For GPU acceleration
    # Enable float64 precision
    export JAX_ENABLE_X64=1
 
+   # Disable GPU memory pre-allocation (allows dynamic allocation)
+   export XLA_PYTHON_CLIENT_PREALLOCATE=false
+
    # Optional: Select specific GPU (default: all GPUs)
    export CUDA_VISIBLE_DEVICES=0
 

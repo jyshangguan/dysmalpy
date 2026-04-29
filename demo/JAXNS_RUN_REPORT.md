@@ -77,6 +77,7 @@ find /usr/local/cuda* -name "libcupti.so" 2>/dev/null
 # Set cuPTI library path (adjust for your system based on step 1)
 export LD_LIBRARY_PATH=/usr/local/cuda-12.4/extras/CUPTI/lib64:/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH
 export JAX_ENABLE_X64=1
+export XLA_PYTHON_CLIENT_PREALLOCATE=false  # Allow dynamic GPU memory allocation
 
 # Activate conda environment
 source ~/miniconda3/etc/profile.d/conda.sh
