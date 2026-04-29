@@ -10,7 +10,7 @@ nSteps=5, oversample=1) for a quick demo. For a real analysis increase these
 substantially (e.g. nWalkers=200, nBurn=50, nSteps=200, oversample=3).
 
 Usage:
-    JAX_PLATFORMS=cpu python demo/demo_2D_fitting_MCMC.py
+    CUDA_VISIBLE_DEVICES=0 python demo/demo_2D_fitting_MCMC.py
 """
 
 import os

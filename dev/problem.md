@@ -425,3 +425,56 @@ print('TerminationCondition' in dir(jaxns))  # True for 2.6.9+
 - `NestedSampler`, `Model`, `Prior` remain in top-level `jaxns` module
 - `TerminationCondition` now also in top-level (previously in `jaxns.nested_sampler`)
 - Other imports (summary, plot_diagnostics, plot_cornerplot) unchanged
+
+
+---
+
+## 19. JAXNS 2.6.9 Multi-GPU Performance Requires Explicit Device Configuration
+
+**Problem:** After upgrading from JAXNS 2.4.13 to 2.6.9, GPU memory usage dropped from ~8GB to <500MB
+and performance degraded significantly.
+
+**Symptom:**
+- GPU memory: <500MB (was ~8GB with JAXNS 2.4.13)
+- GPU utilization: 0-12% (very low)
+- Slow performance compared to JAXNS 2.4.13
+
+**Root Cause:**
+JAXNS 2.6.9 `NestedSampler` requires explicit `devices` parameter to distribute work across GPUs.
+While `devices=None` (default) technically uses all devices, the parallelization efficiency is lower
+than JAXNS 2.4.13's `DefaultNestedSampler`.
+
+**Fix:**
+Added `num_parallel_workers` parameter to `JAXNSFitter` which maps to the `devices` parameter:
+
+```python
+# In dysmalpy/fitting/jaxns.py:
+if self.num_parallel_workers is not None and self.num_parallel_workers > 0:
+    # User specified number of workers
+    import jax
+    all_devices = jax.devices()
+    num_to_use = min(self.num_parallel_workers, len(all_devices))
+    ns_kwargs['devices'] = all_devices[:num_to_use]
+else:
+    # Auto-detect: use all available devices
+    import jax
+    num_devices = len(jax.devices())
+    logger.info(f"JAXNS: Using all {num_devices} available GPUs")
+```
+
+**Usage:**
+```python
+# In parameter file or demo script:
+num_parallel_workers, 8  # Use 8 GPUs (1 worker per GPU)
+num_parallel_workers, 16  # Use 16 workers on 8 GPUs (2 per GPU, if memory allows)
+```
+
+**Results:**
+- GPU memory: 2-5GB per GPU (restored to expected levels)
+- GPU utilization: ~38-40% on active GPUs
+- Log message: "JAXNS: Using all 8 available GPUs"
+
+**Notes:**
+- `num_parallel_workers=None` (default) auto-detects and uses all available GPUs
+- Allows >1 worker per GPU if memory permits
+- JAXNS 2.6.9 uses `NestedSampler` instead of `DefaultNestedSampler` (API change)

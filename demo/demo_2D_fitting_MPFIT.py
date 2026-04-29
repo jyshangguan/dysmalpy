@@ -6,7 +6,7 @@ It runs a full 2D kinematic fit (MPFIT) and produces a best-fit plot, a human-re
 results report, and a machine-readable results table.
 
 Usage:
-    JAX_PLATFORMS=cpu python demo/demo_2D_fitting_MPFIT.py
+    CUDA_VISIBLE_DEVICES=0 python demo/demo_2D_fitting_MPFIT.py
 """
 
 import os

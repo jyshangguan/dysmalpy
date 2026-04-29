@@ -535,3 +535,56 @@ from jaxns import NestedSampler, Model, Prior, TerminationCondition
 - Added to dev/problem.md as Problem #18 ✓
 
 **Commit:** f6f1a6c
+
+**Performance Fix (2026-04-29): JAXNS 2.6.9 Multi-GPU Configuration**
+
+**Problem:**
+After JAXNS upgrade from 2.4.13 to 2.6.9:
+- GPU memory dropped from ~8GB to <500MB
+- GPU utilization: 0-12%
+- Demo significantly slower than before
+
+**Root Cause:**
+JAXNS 2.6.9 `NestedSampler` has different parallelization behavior than 2.4.13's
+`DefaultNestedSampler`. The `devices` parameter controls GPU distribution.
+
+**Solution:**
+Added `num_parallel_workers` parameter to `JAXNSFitter`:
+- Maps to `devices` parameter in `NestedSampler`
+- Default: `None` (auto-detect, uses all available GPUs)
+- User can specify custom number: `num_parallel_workers, 16` (2 workers per GPU on 8 GPUs)
+
+**Implementation:**
+```python
+# dysmalpy/fitting/jaxns.py line ~319
+self.num_parallel_workers = None  # None = auto-detect (1 per GPU)
+
+# dysmalpy/fitting/jaxns.py line ~464
+if self.num_parallel_workers is not None and self.num_parallel_workers > 0:
+    all_devices = jax.devices()
+    num_to_use = min(self.num_parallel_workers, len(all_devices))
+    ns_kwargs['devices'] = all_devices[:num_to_use]
+    logger.info(f"JAXNS: Using {num_to_use} GPUs")
+else:
+    num_devices = len(jax.devices())
+    logger.info(f"JAXNS: Using all {num_devices} available GPUs")
+```
+
+**Demo Update:**
+```python
+# demo/demo_2D_fitting_JAXNS.py
+num_parallel_workers, 8  # Use 8 parallel workers (1 per GPU)
+```
+
+**Results:**
+- GPU memory: 2-5GB per GPU ✓ (restored)
+- GPU utilization: ~38-40% ✓ (improved from 0-12%)
+- Log message: "JAXNS: Using all 8 available GPUs" ✓
+
+**Files Modified:**
+- `dysmalpy/fitting/jaxns.py` - Added `num_parallel_workers` parameter
+- `demo/demo_2D_fitting_JAXNS.py` - Added `num_parallel_workers, 8` to overrides
+- `dev/problem.md` - Added Problem #19
+- `dev/develop_log.md` - This entry
+
+**Commit:** TBD

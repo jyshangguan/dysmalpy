@@ -9,7 +9,7 @@ The model has 10 free parameters (total_mass, r_eff_disk, fdm, sigma0,
 sigmaz, inc, pa, xshift, yshift, vel_shift — minus tied/fixed).
 
 Usage:
-    JAX_PLATFORMS=cpu python demo/demo_2D_fitting_JAXNS.py
+    CUDA_VISIBLE_DEVICES=0 python demo/demo_2D_fitting_JAXNS.py
 """
 
 import os
@@ -46,6 +46,7 @@ JAXNS_OVERRIDES = """
 # ----- JAXNS overrides (appended to MPFIT template) -----
 fit_method,      jaxns
 num_live_points, 150
+num_parallel_workers, 8  # Use 8 parallel workers (1 per GPU)
 dlogZ,            0.1
 oversampled_chisq, True
 verbose,          True
