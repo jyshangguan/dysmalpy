@@ -13,7 +13,14 @@ import subprocess
 
 from setuptools import setup, Extension, find_packages, Command
 from setuptools.command.build_ext import build_ext
-from Cython.Build import cythonize
+
+# Try to import Cython, but make it optional for JAX-only installation
+try:
+    from Cython.Build import cythonize
+    HAS_CYTHON = True
+except ImportError:
+    HAS_CYTHON = False
+    print("Note: Cython not installed. JAX-only installation (Cython extensions will be skipped).")
 
 import logging
 
@@ -32,7 +39,7 @@ log = logging.getLogger(__file__)
 with open('README.rst') as readme_file:
     readme = readme_file.read()
 
-setup_requirements = ['Cython', 'numpy']
+setup_requirements = ['numpy']  # Cython is optional for JAX-only installation
 import_list = ["dysmalpy.lensing", "dysmalpy.utils_least_chi_squares_1d_fitter"]
 name_list = ["LensingTransformer", "LeastChiSquares1D"]
 
@@ -187,8 +194,12 @@ original_ext_modules = [
                 )
             ]
 
-# Cythonize the extensions (default to the site-packages directory)
-ext_modules = cythonize(original_ext_modules, annotate=True)
+# Cythonize the extensions only if Cython is available
+if HAS_CYTHON and os.path.exists("dysmalpy/models/cutils.pyx"):
+    ext_modules = cythonize(original_ext_modules, annotate=True)
+else:
+    print("Installing without Cython extensions (JAX-only mode)")
+    ext_modules = []
 
 class BuildExtCommand(build_ext):
     def run(self):

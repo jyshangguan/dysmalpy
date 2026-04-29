@@ -161,33 +161,103 @@ supporting JAXNS nested sampling and JAX-Adam optimization. For GPU acceleration
 
 Dependencies
 ------------
+
+**Core dependencies** (installed automatically with pip):
+
 * python (version >= 3.10)
-* numpy (version >= 1.24.3, < 2.0.0)
-* scipy (version >=1.9.3)
+* numpy (version >= 2.0)
+* scipy (version >= 1.9.3)
 * matplotlib
+* astropy (version >= 6.0)
 * pandas
 * ipython
-* defaults
-* pytest
 * multiprocess
-* astropy (version >= 5.3, < 6.0)
-* multiprocess
-* emcee (version >= 3)
-* dynesty (version >= 2.1.3)
-* corner (version >= 2.2.2)
-* cython
+* h5py (version >= 3.8.0)
 * dill (version >= 0.3.7)
-* photutils (version >= 1.8.0)
 * shapely (version >= 2)
+* photutils (version >= 1.8.0)
 * spectral-cube (version >= 0.6.0)
 * radio-beam (version >= 0.3.3)
-* h5py (version >= 3.8.0)
-* six
+
+**Fitting backends**:
+
+* emcee (version >= 3) — MCMC sampling
+* dynesty (version >= 2.1.3) — Dynamic nested sampling
+* corner (version >= 2.2.2) — Corner plots for posterior samples
+
+**JAX acceleration** (JAX version only):
+
+* jax (version == 0.7.2) — Automatic differentiation
+* jaxlib (version == 0.7.2) — JAX library backend
+* tfp-nightly — TensorFlow Probability for JAXNS
+* jaxns (version == 2.6.9) — JAX-accelerated nested sampling
+
+**Optional dependencies**:
+
+* pytest — Testing framework
+* Cython — For Cython-based version (dysmalpy_origin branch)
+* GSL, CFITSIO — For lens fitting C++ extensions
+
+All dependencies are automatically installed with ``pip install -e .``.
 
 Installation
 ------------
 
-To install DYSMALPY, please follow the instructions in the `installation instructions`_ file.
+Dysmalpy has two installation options:
+
+**Option 1: JAX-accelerated version (current main branch, experimental)**
+
+The JAX version provides GPU acceleration and modern Bayesian fitting methods::
+
+   # Create conda environment
+   conda create -n dysmalpy python=3.11
+   conda activate dysmalpy
+
+   # Install with pip (recommended)
+   pip install -e .
+
+   # For GPU support, set environment variables BEFORE importing JAX:
+   export LD_LIBRARY_PATH=/usr/local/cuda-12.4/extras/CUPTI/lib64:/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH
+   export JAX_ENABLE_X64=1
+   export XLA_PYTHON_CLIENT_PREALLOCATE=false
+
+   # Verify installation
+   python -c "import dysmalpy; print(dysmalpy.__version__)"
+
+This will install all dependencies including JAX, JAXNS, and fitting backends.
+See `JAX-Accelerated Fitting`_ section below for GPU setup details.
+
+**Option 2: Cython-based version (stable, for production use)**
+
+For production work, use the stable Cython-based version from the ``dysmalpy_origin``
+branch or releases prior to 2.0::
+
+   # Checkout stable branch
+   git checkout dysmalpy_origin
+
+   # Create conda environment
+   conda create -n dysmalpy python=3.10
+   conda activate dysmalpy
+
+   # Install Cython first (required for compilation)
+   pip install Cython numpy
+
+   # Install dysmalpy
+   pip install -e .
+
+**Optional Dependencies**
+
+Some features require additional packages:
+
+* **Lens fitting**: Requires GSL and CFITSIO libraries for C++ extensions
+* **Development**: Install with ``pip install -e ".[dev]"`` for testing tools
+* **GPU support**: See JAX-accelerated fitting section for CUDA requirements
+
+**Verification**
+
+Test your installation::
+
+   python -c "import dysmalpy; import jax; print(f'dysmalpy: {dysmalpy.__version__}, JAX: {jax.__version__}')"
 
 Usage
 -----
