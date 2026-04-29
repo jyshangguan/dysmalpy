@@ -460,16 +460,21 @@ class JAXNSFitter(base.Fitter):
         if self.c is not None:
             ns_kwargs['c'] = self.c
 
+        logger.info(f"JAXNS: Creating NestedSampler with c={self.c}")
+        logger.info(f"JAXNS: ns_kwargs keys: {list(ns_kwargs.keys())}")
         ns = NestedSampler(**ns_kwargs)
 
+        logger.info(f"JAXNS: NestedSampler created successfully")
         logger.info(f"JAXNS: Running nested sampling...")
         t0 = time.time()
 
         # Run
+        logger.info(f"JAXNS: Starting ns() call with term_cond={term_cond}")
         termination_reason, state = ns(
             jax.random.PRNGKey(42),
             term_cond=term_cond
         )
+        logger.info(f"JAXNS: ns() call completed")
 
         # Convert to results
         results = ns.to_results(termination_reason=termination_reason,

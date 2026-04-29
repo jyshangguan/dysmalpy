@@ -12,10 +12,14 @@ Usage:
     # RECOMMENDED: Single GPU with parallel Markov chains
     # JAXNS 2.6.9 does NOT actually parallelize across multiple GPUs
     # The 'c' parameter (parallel Markov chains) provides the speedup, not multi-GPU
+    # c=300 uses ~8 GB memory and completes in <1000 seconds (matches old JAXNS 2.4.13 default)
     CUDA_VISIBLE_DEVICES=0 python demo/demo_2D_fitting_JAXNS.py
 
     # Multi-GPU does NOT improve performance - JAXNS only uses 1 GPU at a time
     # CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python demo/demo_2D_fitting_JAXNS.py
+
+    # To reduce memory usage, decrease 'c' in the JAXNS_OVERRIDES section below
+    # c=150 uses ~4 GB memory (slower but less memory intensive)
 """
 
 import os
@@ -44,15 +48,17 @@ local_param = os.path.join(outdir, 'fitting_2D_jaxns_demo.params')
 # JAXNS-specific overrides (key, value) to append after reading the MPFIT file.
 # The read_fitting_params parser simply takes the last value for each key.
 #
-# num_live_points=150, dlogZ=0.1 give good convergence (reduced chi-squared ~9).
-#
 # IMPORTANT: Prior bounds match MPFIT parameter bounds exactly!
 # JAXNS uses *_prior_bounds for flat priors (unlike MPFIT which uses *_bounds)
+#
+# JAXNS 2.6.9 NestedSampler: must set num_live_points explicitly
+# Setting num_live_points=300, c=300 to match old JAXNS 2.4.13 default (30*n_dim)
 JAXNS_OVERRIDES = """
 # ----- JAXNS overrides (appended to MPFIT template) -----
 fit_method,      jaxns
-num_live_points, 150
-c,                150      # 150 parallel Markov chains per GPU (matches num_live_points)
+num_live_points, 300
+c,                300
+# c=300 gives 300 parallel Markov chains (30*n_dim for 10 params), matching old JAXNS 2.4.13 default
 dlogZ,            0.1
 oversampled_chisq, True
 verbose,          True

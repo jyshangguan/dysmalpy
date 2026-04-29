@@ -4,6 +4,8 @@
 
 export PYTHONNOUSERSITE=1
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
+# Add cuPTI library path for JAX CUDA support
+export LD_LIBRARY_PATH=/usr/local/cuda-12.4/extras/CUPTI/lib64:/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH
 conda activate alma
 
 echo "✅ dysmalpy development environment activated"
