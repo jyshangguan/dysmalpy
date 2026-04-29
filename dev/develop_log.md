@@ -505,3 +505,33 @@ RuntimeError: Unable to load cuPTI. Is it installed?
 - GPU support working in both environments
 - CUPTI library path configured permanently
 - All tests passing with GPU acceleration
+
+**Bug Fix (2026-04-29): JAXNS 2.6.9 Import Path**
+
+**Problem:** 
+After upgrading to JAXNS 2.6.9, `demo_2D_fitting_JAXNS.py` failed with:
+```
+ModuleNotFoundError: No module named 'jaxns.nested_sampler'
+```
+
+**Root Cause:**
+- JAXNS 2.6.9 refactored module structure
+- `TerminationCondition` moved from `jaxns.nested_sampler` to top-level `jaxns`
+
+**Fix:**
+Updated `dysmalpy/fitting/jaxns.py` line 353:
+```python
+# OLD (JAXNS 2.4.13):
+from jaxns import NestedSampler, Model, Prior
+from jaxns.nested_sampler import TerminationCondition
+
+# NEW (JAXNS 2.6.9):
+from jaxns import NestedSampler, Model, Prior, TerminationCondition
+```
+
+**Verification:**
+- Demo now runs successfully ✓
+- JAXNS nested sampling completes ✓
+- Added to dev/problem.md as Problem #18 ✓
+
+**Commit:** f6f1a6c

@@ -383,3 +383,45 @@ LD_LIBRARY_PATH includes /usr/local/cuda-12.4/extras/CUPTI/lib64/
 - Multiple GPU devices will be available once CUPTI is loaded (e.g., 8 CUDA devices)
 
 
+
+
+---
+
+## 18. JAXNS 2.6.9 Import Path Changes
+
+**Problem:** JAXNS 2.6.9 changed the import path for `TerminationCondition`, causing
+`ModuleNotFoundError: No module named 'jaxns.nested_sampler'`.
+
+**Symptom:**
+```
+ModuleNotFoundError: No module named 'jaxns.nested_sampler'
+```
+
+**Root Cause:**
+- JAXNS 2.6.9 refactored module structure
+- `TerminationCondition` moved from `jaxns.nested_sampler` to top-level `jaxns` module
+- Old import: `from jaxns.nested_sampler import TerminationCondition`
+- New import: `from jaxns import TerminationCondition`
+
+**Fix:** Update import statement in `dysmalpy/fitting/jaxns.py`
+
+**Change:**
+```python
+# OLD (JAXNS 2.4.13):
+from jaxns import NestedSampler, Model, Prior
+from jaxns.nested_sampler import TerminationCondition
+
+# NEW (JAXNS 2.6.9):
+from jaxns import NestedSampler, Model, Prior, TerminationCondition
+```
+
+**Verification:**
+```python
+import jaxns
+print('TerminationCondition' in dir(jaxns))  # True for 2.6.9+
+```
+
+**Notes:**
+- `NestedSampler`, `Model`, `Prior` remain in top-level `jaxns` module
+- `TerminationCondition` now also in top-level (previously in `jaxns.nested_sampler`)
+- Other imports (summary, plot_diagnostics, plot_cornerplot) unchanged
