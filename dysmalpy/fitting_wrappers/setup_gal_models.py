@@ -491,7 +491,7 @@ def _setup_jaxns_fitter(params=None):
     for key in ['blob_name', 'nPostBins', 'oversampled_chisq',
                 'num_live_points', 'dlogZ',
                 'max_num_likelihood_evaluations',
-                'max_samples', 's', 'k', 'c',
+                'max_samples', 's', 'k', 'c', 'num_parallel_workers',
                 'difficult_model', 'parameter_estimation',
                 'shell_fraction', 'gradient_guided',
                 'init_efficiency_threshold', 'verbose']:
