@@ -19,8 +19,16 @@ It extends the IDL-based DYSMAL fitting models introduced and thoroughly
 tested in previous works (`Davies et al. 2004a`_; `Davies et al. 2004b`_; 
 `Cresci et al. 2009`_; `Davies et al. 2011`_) as well as subsequent 
 improvements described by `Wuyts et al. 2016`_; `Lang et al. 2017`_; `Genzel et al. 2017`_;
-`Übler et al. 2018`_. Its Python incarnation and latest developments and 
-testing are presented by `Price et al. 2021`_ and `Lee et al. 2025`_. 
+`Übler et al. 2018`_. Its Python incarnation and latest developments and
+testing are presented by `Price et al. 2021`_ and `Lee et al. 2025`_.
+
+.. warning::
+   **Experimental JAX Version:** The current version (2.0+) uses JAX-accelerated
+   computation for GPU speedup. This is an **experimental implementation** and may
+   have numerical differences from the stable Cython-based version. For production
+   work, please use the Cython version (branch ``dysmalpy_origin`` or releases
+   prior to 2.0). The JAX version is under active development and should be used
+   with caution for research results.
 
 This code employs a set of models that describe the mass distribution and 
 various kinematic components to describe and fit the kinematics of galaxies. 
@@ -66,6 +74,12 @@ Appendix in `Price et al. 2021`_ as well as `Lee et al. 2025`_.
 
 JAX-Accelerated Fitting
 ~~~~~~~~~~~~~~~~~~~~~~~
+
+.. warning::
+   **Experimental Status:** The JAX-accelerated fitting (JAXNS, JAX-Adam) is
+   **experimental** and under active development. Results may differ from the
+   stable Cython-based version. For production work, use the Cython version
+   (branch ``dysmalpy_origin`` or releases prior to 2.0).
 
 The current version (2.0+) uses JAX-accelerated computation for GPU speedup,
 supporting JAXNS nested sampling and JAX-Adam optimization. For GPU acceleration:

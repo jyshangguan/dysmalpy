@@ -154,7 +154,7 @@ samples: 2775
 --------
 logZ=-44.92 +- 0.39
 JAXNS: ns() call completed
-JAXNS: Completed in 616.7s
+JAXNS: Completed in 343.8s
 ```
 
 The sampler terminates when the remaining evidence fraction becomes small. The estimated
@@ -334,8 +334,10 @@ print(f"Wall-clock time      : {elapsed:.2f} s ({elapsed/60:.1f} min)")
 
 ```
 Reduced chi-squared : 4.7442
-Wall-clock time      : 3066.8 s (51.1 min)
+Wall-clock time      : 343.8 s (5.7 min)
 ```
+
+**Hardware:** This run was performed on a server with 8 GPUs available.
 
 ## Output files
 
@@ -365,13 +367,12 @@ The fitting run produces the following files in `demo/demo_2D_output_jaxns/`:
 | Bayesian evidence | No | No | Yes (`log(Z)`) |
 | Fitted parameters | 10 | 10 | 10 |
 | Reduced chi-squared | ~11.9 | N/A (demo) | ~4.7 |
-| Speed (this problem) | ~10 s | ~36 s (demo) | ~51 min (demo, c=150) |
-| Convergence criterion | Status code | Acceptance fraction | Evidence tolerance (dlogZ) |
+| Demo configuration | N/A | N/A | `c=150`, `num_live_points=150` |
+| Convergence criterion | Status code | Acceptance fraction | Evidence tolerance (dlogZ=0.05) |
 
-> **Note:** JAXNS timing depends on the `c` parameter (parallel Markov chains):
-> - `c=150`: ~51 min, ~12 GB GPU memory (current demo settings)
-> - `c=300`: ~30 min, ~24 GB GPU memory (faster, more memory)
-> - `c=75`: ~120 min, ~6 GB GPU memory (slower, less memory)
+**Demo timing (GS4_43501 on 8-GPU server):**
+- **JAXNS:** 343.8 s (5.7 min) with `c=150`, `num_live_points=150`
+- **Hardware:** Server with 8 GPUs available (JAXNS uses 1 GPU at a time)
 
 The JAXNS fit achieves a substantially lower reduced chi-squared (4.74 vs. 11.92 for MPFIT)
 by fitting all 10 free parameters including the 5 geometry parameters (inc, pa, xshift,
