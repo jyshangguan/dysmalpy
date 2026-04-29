@@ -478,3 +478,98 @@ num_parallel_workers, 16  # Use 16 workers on 8 GPUs (2 per GPU, if memory allow
 - `num_parallel_workers=None` (default) auto-detects and uses all available GPUs
 - Allows >1 worker per GPU if memory permits
 - JAXNS 2.6.9 uses `NestedSampler` instead of `DefaultNestedSampler` (API change)
+
+
+---
+
+## 20. JAXNS Parallelization: c (Markov Chains) vs devices (Multi-GPU)
+
+**Understanding JAXNS 2.6.9 Parallelization:**
+
+JAXNS has TWO levels of parallelization that work together:
+
+### 1. `c` Parameter - Parallel Markov Chains (PER GPU)
+
+**What it controls:**
+- Number of parallel Markov chains running on EACH GPU
+- This is the primary source of parallel sampling speedup
+- Default: `c = 20 * D` (where D = number of dimensions/parameters)
+
+**Example:**
+- 10 parameters → default `c = 20 * 10 = 200` parallel chains
+- Each GPU runs 200 parallel sampling chains simultaneously
+- This is what gave fast performance on 1 GPU with JAXNS 2.4.13
+
+**How to set in param file:**
+```python
+c, 150  # 150 parallel chains per GPU
+```
+
+**Recommendation:** Set `c` to match or exceed `num_live_points` for optimal efficiency.
+
+### 2. `devices` Parameter - Multi-GPU Selection
+
+**What it controls:**
+- WHICH GPUs to use for computation
+- Does NOT control parallelization speed (that's `c`)
+- Default: all available GPUs
+
+**How to control:**
+- Via `num_parallel_workers` parameter (maps to `devices`)
+- Or via `CUDA_VISIBLE_DEVICES` environment variable
+
+**Examples:**
+```python
+# Use only 1 GPU
+num_parallel_workers, 1  # Or CUDA_VISIBLE_DEVICES=0
+
+# Use 4 GPUs
+num_parallel_workers, 4  # Or CUDA_VISIBLE_DEVICES=0,1,2,3
+
+# Use all 8 GPUs
+num_parallel_workers, 8  # Or don't set (default = all)
+```
+
+### Combined Parallelization
+
+**Maximum parallelism (8 GPUs × 150 chains = 1200 total):**
+```python
+c, 150                  # 150 parallel chains per GPU
+num_parallel_workers, 8  # Use all 8 GPUs
+```
+
+**Single GPU with high parallelism (like JAXNS 2.4.13):**
+```python
+c, 150  # 150 parallel chains on 1 GPU
+# Run with: CUDA_VISIBLE_DEVICES=0
+```
+
+### Performance Comparison
+
+| Configuration | Parallel Chains | GPUs | Total Capacity |
+|--------------|-----------------|------|----------------|
+| Before (JAXNS 2.4.13) | 200 (default) | 1 | 200 chains |
+| After fix (c=150, 1 GPU) | 150 | 1 | 150 chains |
+| After fix (c=150, 8 GPUs) | 150 | 8 | 1200 chains |
+
+**Key Insight:** The `c` parameter (parallel Markov chains) is what provides the sampling parallelization,
+not the number of GPUs. GPUs just provide more hardware for running those chains.
+
+### Migration from JAXNS 2.4.13
+
+**Before (JAXNS 2.4.13 with DefaultNestedSampler):**
+```python
+# You probably didn't set c explicitly
+# Default c = 20 * 10 = 200 chains
+# Result: Fast performance from 200 parallel chains
+```
+
+**After (JAXNS 2.6.9 with NestedSampler):**
+```python
+# Set c explicitly to match desired parallelism
+c, 150  # 150 parallel chains (matching num_live_points)
+# Result: Similar fast performance
+```
+
+**Note:** If `c` is not set, JAXNS 2.6.9 uses the same default (20 * D), so performance should be similar.
+However, setting `c = num_live_points` is recommended for optimal efficiency.

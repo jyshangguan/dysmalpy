@@ -9,7 +9,13 @@ The model has 10 free parameters (total_mass, r_eff_disk, fdm, sigma0,
 sigmaz, inc, pa, xshift, yshift, vel_shift — minus tied/fixed).
 
 Usage:
+    # For single GPU with parallel sampling (recommended)
     CUDA_VISIBLE_DEVICES=0 python demo/demo_2D_fitting_JAXNS.py
+
+    # For multi-GPU with parallel sampling
+    CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python demo/demo_2D_fitting_JAXNS.py
+
+    # To control which GPUs are used, set num_parallel_workers in JAXNS_OVERRIDES below
 """
 
 import os
@@ -46,7 +52,7 @@ JAXNS_OVERRIDES = """
 # ----- JAXNS overrides (appended to MPFIT template) -----
 fit_method,      jaxns
 num_live_points, 150
-num_parallel_workers, 8  # Use 8 parallel workers (1 per GPU)
+c,                150      # 150 parallel Markov chains per GPU (matches num_live_points)
 dlogZ,            0.1
 oversampled_chisq, True
 verbose,          True
