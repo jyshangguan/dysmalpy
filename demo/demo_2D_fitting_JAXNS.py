@@ -56,10 +56,10 @@ local_param = os.path.join(outdir, 'fitting_2D_jaxns_demo.params')
 JAXNS_OVERRIDES = """
 # ----- JAXNS overrides (appended to MPFIT template) -----
 fit_method,      jaxns
-num_live_points, 300
-c,                300
+num_live_points, 150
+c,                150
 # c=300 gives 300 parallel Markov chains (30*n_dim for 10 params), matching old JAXNS 2.4.13 default
-dlogZ,            0.1
+dlogZ,            0.05
 oversampled_chisq, True
 verbose,          True
 
