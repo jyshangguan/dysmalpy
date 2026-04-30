@@ -80,18 +80,19 @@ INFO:DysmalPy:        velocity file: .../tests/test_data/GS4_43501_Ha_vm.fits
 INFO:DysmalPy:        dispers. file: .../tests/test_data/GS4_43501_Ha_dm.fits
 
 MPFIT Fitting:
-Start: 2026-04-13 14:47:06
+Start: 2026-04-30 14:31:19
 
-INFO:DysmalPy:Iter 1  CHI-SQUARE = 4863.958322  DOF = 404
-INFO:DysmalPy:Iter 2  CHI-SQUARE = 4795.885305  DOF = 404
-INFO:DysmalPy:Iter 3  CHI-SQUARE = 4793.828721  DOF = 404
-INFO:DysmalPy:Iter 4  CHI-SQUARE = 4793.469547  DOF = 404
+INFO:DysmalPy:Iter 1  CHI-SQUARE = 4863.958322  DOF = 1406
+INFO:DysmalPy:Iter 2  CHI-SQUARE = 3872.948998  DOF = 1406
+INFO:DysmalPy:Iter 3  CHI-SQUARE = 3854.268312  DOF = 1406
+...
+INFO:DysmalPy:Iter 34  CHI-SQUARE = 3847.779785  DOF = 1406
 
-End: 2026-04-13 14:47:16
+End: 2026-04-30 14:32:27
 MPFIT Status = 2
-Time = 9.86 (sec)
+Time = 67.60 (sec)
 
-Fitting completed in 15.01 s
+Fitting completed in 68.35 s
 ```
 
 MPFIT status `2` means convergence was achieved (general convergence).
@@ -138,7 +139,7 @@ print(report)
 ###############################
  Fitting for GS4_43501
 
-Date: 2026-04-13 14:47:19
+Date: 2026-04-30 14:32:27
 
     obs: OBS
          Datafiles:
@@ -164,8 +165,8 @@ pressure_support_type: 1
  Fitting results
 -----------
  disk+bulge
-    total_mass         10.9759  +/-   0.0022
-    r_eff_disk          4.9961  +/-   0.0035
+    total_mass         11.1881  +/-   0.0143
+    r_eff_disk         10.0243  +/-   0.3935
 
     mass_to_light       1.0000  [FIXED]
     n_disk              1.0000  [FIXED]
@@ -176,32 +177,31 @@ pressure_support_type: 1
     noord_flat          True
 -----------
  halo
-    fdm                 0.0998  +/-   0.0000
-
     mvirial            11.0000  [UNKNOWN]
+    fdm                 0.1572  [TIED]
     conc                5.0000  [UNKNOWN]
 -----------
  dispprof_LINE
-    sigma0             39.0000  +/-   0.0000
+    sigma0             31.7082  +/-   0.6964
 -----------
  zheightgaus
-    sigmaz              0.8493  +/-   0.0000
+    sigmaz              1.7028  [TIED]
 -----------
  geom_1
-    inc                72.0000  +/-   0.0000
-    pa                145.2488  +/-   0.0000
-    xshift              0.0071  +/-   0.0000
-    yshift             -0.1300  +/-   0.0000
-    vel_shift           0.0000  +/-   0.0000
+    inc                75.1479  +/-   0.6033
+    pa                146.2573  +/-   0.3563
+    xshift             -0.1690  +/-   0.0160
+    yshift             -0.8297  +/-   0.0328
+    vel_shift          11.0599  +/-   0.5129
 
 -----------
 Adiabatic contraction: False
 
 -----------
-Red. chisq: 11.9241
+Red. chisq: 3.4586
 
 -----------
-obs OBS: Rout,max,2D: 10.3258
+obs OBS: Rout,max,2D: 10.8553
 ```
 
 ### Machine-readable results table

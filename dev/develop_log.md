@@ -1086,3 +1086,183 @@ pip install -e .
 - Setuptools optional extensions documentation
 - Python packaging user guide
 
+
+---
+
+## 2026-04-30: MCMC Post-Sampling Error Investigation and Fix
+
+### Problem
+
+User reported that `demo/demo_2D_fitting_MCMC.py` script crashes after MCMC sampling
+finishes, during the post-sampling analysis phase.
+
+### Investigation Process
+
+**1. Created working directory:**
+```bash
+mkdir -p /home/shangguan/Softwares/my_modules/dysmalpy/dev/mcmc_demo_debug
+cd /home/shangguan/Softwares/my_modules/dysmalpy/dev/mcmc_demo_debug
+```
+
+**2. Created short test script:**
+- File: `dev/mcmc_demo_debug/test_mcmc_short.py`
+- Very short chains for fast testing: nWalkers=32, nBurn=2, nSteps=3
+- Includes error handling to capture full traceback
+- Tests both fitting and results reloading
+
+**3. Reproduced the error:**
+```
+ValueError: setting an array element with a sequence.
+TypeError: only 0-dimensional arrays can be converted to Python scalars
+
+Traceback:
+  File "dysmalpy/fitting/mcmc.py", line 886, in _fit_emcee_3
+    mcmcResults.analyze_plot_save_results(gal, output_options=output_options)
+  File "dysmalpy/fitting/base.py", line 306, in analyze_plot_save_results
+    self.analyze_posterior_dist(gal=gal)
+  File "dysmalpy/fitting/base.py", line 496, in analyze_posterior_dist
+    param_bestfit = fit_utils.find_peak_gaussian_KDE(self.sampler.samples, peak_hist)
+  File "dysmalpy/fitting/utils.py", line 299, in find_peak_gaussian_KDE
+    peakvals[i] = fmin(lambda x: -kern(x), initval[i],disp=False)
+```
+
+**4. Identified root cause:**
+
+In `dysmalpy/fitting/utils.py`, line 299:
+```python
+peakvals[i] = fmin(lambda x: -kern(x), initval[i], disp=False)
+```
+
+`scipy.optimize.fmin()` returns an array (e.g., `[value]`), not a scalar.
+The code tries to assign this array to a single element `peakvals[i]`, which fails.
+
+This is a scipy version compatibility issue. Older scipy versions may have
+returned scalars when `fmin()` was given scalar inputs, but newer versions
+always return arrays.
+
+### Solution
+
+**Single-line fix in `dysmalpy/fitting/utils.py`:**
+
+```python
+# Line 299 - Change from:
+peakvals[i] = fmin(lambda x: -kern(x), initval[i], disp=False)
+
+# To:
+peakvals[i] = fmin(lambda x: -kern(x), initval[i], disp=False)[0]
+```
+
+This extracts the first (and only) element from the `fmin()` result array.
+
+**Note:** The single-parameter case (lines 304-309) already handles this correctly
+with a try/except block that attempts to return `peakval[0]` first.
+
+### Files Modified
+
+1. **`dev/problem.md`**
+   - Added Problem #28 documenting the MCMC fmin issue
+   - Includes symptoms, root cause, fix, and verification steps
+
+2. **`dev/develop_log.md`**
+   - This entry documenting the investigation process
+
+3. **`dev/mcmc_demo_debug/`** - Created investigation directory
+   - `test_mcmc_short.py` - Quick test script to reproduce the error
+   - `PLAN_MCMC_FMIN_FIX.md` - Detailed fix plan and testing strategy
+
+### Testing Plan
+
+**Test script created:** `dev/mcmc_demo_debug/test_mcmc_short.py`
+
+Run with:
+```bash
+python dev/mcmc_demo_debug/test_mcmc_short.py
+```
+
+**Expected results after fix:**
+1. ✅ MCMC sampling completes
+2. ✅ Posterior analysis runs without error
+3. ✅ Results saved to pickle files
+4. ✅ Results can be reloaded
+5. ✅ Diagnostic plots generated (corner, trace, best-fit)
+6. ✅ Results reports printed
+
+---
+
+**FIX APPLIED AND TESTED ✅**
+
+**Date:** 2026-04-30 09:58
+
+**Fix applied to:** `dysmalpy/fitting/utils.py` line 299
+
+**Change made:**
+```python
+# Before:
+peakvals[i] = fmin(lambda x: -kern(x), initval[i], disp=False)
+
+# After:
+peakvals[i] = fmin(lambda x: -kern(x), initval[i], disp=False)[0]
+```
+
+**Testing Results:**
+- ✅ Test script completed successfully in 76.65 seconds
+- ✅ All output files created correctly
+- ✅ Results can be reloaded and analyzed
+- ✅ No more ValueError crashes
+
+**Cleanup:**
+- Removed test output files and logs from `dev/mcmc_demo_debug/`
+- Kept documentation: PLAN_MCMC_FMIN_FIX.md, INVESTIGATION_SUMMARY.md
+- Updated `dev/problem.md` Problem #28 with fix status
+
+### Verification
+
+After fix is applied, also test:
+```bash
+# Full MCMC demo (longer runtime)
+python demo/demo_2D_fitting_MCMC.py
+
+# Check that outputs are generated:
+# - demo_2D_output_mcmc/GS4_43501_mcmc_sampler.h5
+# - demo_2D_output_mcmc/GS4_43501_mcmc_results.pickle
+# - demo_2D_output_mcmc/GS4_43501_model.pickle
+# - demo_2D_output_mcmc/GS4_43501_mcmc_param_corner.png
+# - demo_2D_output_mcmc/GS4_43501_mcmc_trace.png
+# - demo_2D_output_mcmc/GS4_43501_mcmc_bestfit.png
+```
+
+### Impact
+
+**Severity:** High - Breaks all MCMC fitting workflows
+
+**Scope:**
+- Affects all MCMC-based fitting (`fit_method='mcmc'`)
+- Does NOT affect JAXNS, MPFIT, or other fitters
+- Only affects post-sampling analysis, not the sampling itself
+
+**Backward compatibility:**
+- Fix is backward compatible
+- Extracting `[0]` from array works for both old and new scipy
+- Matches pattern already used elsewhere in same function
+
+### Key Insights
+
+1. **scipy API changes:** scipy optimization functions changed return type behavior
+   - Old: Scalar input → scalar output
+   - New: Scalar input → array output
+
+2. **Defensive programming:** The existing try/except pattern (lines 306-309) shows
+   the original author anticipated potential array/scalar ambiguity
+
+3. **Quick testing:** Creating minimal test cases with very short chains is invaluable
+   for fast iteration during debugging
+
+4. **Development workflow:** Using dedicated `dev/` subdirectories for investigation
+   keeps debugging artifacts organized and doesn't clutter the main codebase
+
+### References
+
+- `dev/problem.md` - Problem #28: Full technical details
+- `dev/mcmc_demo_debug/PLAN_MCMC_FMIN_FIX.md` - Detailed fix plan
+- `dev/mcmc_demo_debug/test_mcmc_short.py` - Test script
+

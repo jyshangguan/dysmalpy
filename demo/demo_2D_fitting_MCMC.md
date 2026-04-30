@@ -116,31 +116,34 @@ INFO:DysmalPy: Fitting: GS4_43501 with MCMC
 INFO:DysmalPy:    obs: OBS
 INFO:DysmalPy:        velocity file: .../tests/test_data/GS4_43501_Ha_vm.fits
 INFO:DysmalPy:        dispers. file: .../tests/test_data/GS4_43501_Ha_dm.fits
-nCPUs: 1
-INFO:DysmalPy:nWalkers: 20
+nCPUs: 10
+INFO:DysmalPy:nWalkers: 32
 INFO:DysmalPy:lnlike: oversampled_chisq=True
 
 Burn-in:
-Start: 2026-04-14 08:07:00
+Start: 2026-04-30 11:22:03
 
-End: 2026-04-14 08:07:15
-nCPU, nParam, nWalker, nBurn = 1, 10, 20, 2
-Mean acceptance fraction: 0.000
+End: 2026-04-30 11:23:27
+nCPU, nParam, nWalker, nBurn = 10, 8, 32, 100
+Time= 84.19 (sec)
+Mean acceptance fraction: 0.325
 Ideal acceptance frac: 0.2 - 0.5
+Autocorr est: [ 8.88 12.59 12.55  8.10 11.34  8.80 11.65 12.52]
 
 Ensemble sampling:
-Start: 2026-04-14 08:07:16
+Start: 2026-04-30 11:23:27
 
-Finished 5 steps
-Time= 14.91 (sec)
-Mean acceptance fraction: 0.000
+Finished 500 steps
+Time= 703.77 (sec)
+Mean acceptance fraction: 0.298
 
-Fitting completed in 36.26 s
+Fitting completed in 788.09 s
 ```
 
-The 0% acceptance fraction and `nan` autocorrelation times are expected with only
-5 production steps and 2 burn-in steps. A real analysis needs many more steps for
-the walkers to explore the parameter space.
+The acceptance fraction of ~0.3 and finite autocorrelation times indicate the
+sampler is converging. With 500 production steps and 32 walkers, the chains are
+beginning to explore the parameter space properly. A production run with even
+more steps (1000+) would yield tighter constraints.
 
 ## 3) Examine results
 
@@ -180,17 +183,18 @@ velocity and dispersion maps](figs/GS4_43501_mcmc_bestfit_demo_OBS.png)
 
 #### Trace plot
 
-Walker chains for each free parameter across sampling steps. With only 5 steps
-the chains show no mixing -- a production run would show well-mixed, stationary
-chains that explore the posterior.
+Walker chains for each free parameter across sampling steps. With 500 steps
+the chains show good mixing and are beginning to explore the posterior.
+A production run with 1000+ steps would show well-mixed, stationary chains.
 
 ![MCMC trace plot](figs/GS4_43501_mcmc_trace_demo.png)
 
 #### Corner plot
 
-Pairwise posterior distributions for all free parameters. With too few samples the
-contours are poorly defined. A production run yields smooth, well-constrained
-marginalised posteriors.
+Pairwise posterior distributions for all free parameters. The contours are
+well-defined for most parameters, showing reasonable constraints. Some parameters
+(like `r_eff_disk`) remain partially degenerate, which is expected for this
+high-redshift galaxy with limited spatial resolution.
 
 ![MCMC corner plot](figs/GS4_43501_mcmc_param_corner_demo.png)
 
@@ -211,32 +215,53 @@ Fitting method: MCMC
  Fitting results
 -----------
  disk+bulge
-    total_mass         10.0394  -   1.8010 +   2.1749
-    r_eff_disk         27.0304  -   9.0737 +  17.0591
+    total_mass         11.4372  -   0.0840 +   0.1010
+    r_eff_disk         19.3411  -   4.5541 +   5.9514
+
+    mass_to_light       1.0000  [FIXED]
+    n_disk              1.0000  [FIXED]
+    r_eff_bulge         1.0000  [UNKNOWN]
+    n_bulge             4.0000  [FIXED]
+    bt                  0.3000  [UNKNOWN]
+
+    noord_flat          True
 -----------
  halo
-    fdm                 0.3141  -  -0.0277 +   0.6786
+    mvirial            11.0000  [UNKNOWN]
+    fdm                 0.1836  [TIED]
+    conc                5.0000  [UNKNOWN]
 -----------
  dispprof_LINE
-    sigma0           80714.2476  -18376.6639 +16486.2604
+    sigma0             31.5159  -   6.7565 +   7.5634
 -----------
  zheightgaus
-    sigmaz              2.4998  -  -0.8948 +   6.4606
+    sigmaz              3.2854  [TIED]
 -----------
  geom_1
-    inc                22.0376  -   4.9197 +  46.5814
-    pa                -95.1432  -   5.4248 + 241.5527
-    xshift           -39845.7891  -33631.4948 +90025.6242
-    yshift           -80923.0128  --48558.6534 +154446.0973
-    vel_shift        -45770.5908  -16246.9540 +65829.3156
+    inc                58.9403  -   6.1635 +   8.3578
+    pa                146.3541  -   1.1877 +   2.1475
+    xshift              0.3969  -   0.3520 +   0.3254
+    yshift             -0.9203  -   0.2568 +   0.2438
+    vel_shift          16.6010  -   2.8871 +   3.5617
+
 -----------
-Red. chisq: nan
+    mvirial            11.0000  -   0.0000 +   0.0000
+
+-----------
+Adiabatic contraction: False
+
+-----------
+Red. chisq: 3.2641
+
+-----------
+obs OBS: Rout,max,2D: 10.8553
 ```
 
-Note the extremely wide and physically implausible credible intervals (e.g. `xshift`
-spanning tens of thousands of km/s). This is a direct consequence of running only
-5 steps with 20 walkers -- the sampler has not converged. A production run with
-`nWalkers=200, nBurn=50, nSteps=200` yields tight, physically meaningful constraints.
+The credible intervals are now physically reasonable and show good constraints
+on most parameters. The geometry parameters (inclination, PA, shifts) are
+well-constrained by the 2D kinematic maps. Some parameters like `r_eff_disk`
+and `fdm` show moderate uncertainties due to parameter degeneracies, which is
+typical for high-redshift galaxies with limited spatial resolution.
 
 ### Machine-readable results table
 
@@ -247,17 +272,17 @@ print(machine)
 
 ```
 # component             param_name      fixed       best_value   l68_err     u68_err
-disk+bulge              total_mass      False        10.0394      1.8010      2.1749
-disk+bulge              r_eff_disk      False        27.0304      9.0737     17.0591
-halo                    fdm             TIED          0.3141     -0.0277      0.6786
-dispprof_LINE           sigma0          True      80714.2476   18376.6639   16486.2604
-zheightgaus             sigmaz          TIED          2.4998     -0.8948      6.4606
-geom_1                  inc             False        22.0376      4.9197     46.5814
-geom_1                  pa              False       -95.1432      5.4248    241.5527
-geom_1                  xshift          False    -39845.7891   33631.4948   90025.6242
-geom_1                  yshift          False    -80923.0128   -48558.6534   154446.0973
-geom_1                  vel_shift       True     -45770.5908   16246.9540   65829.3156
-redchisq                -----           -----            nan    -99.0000    -99.0000
+disk+bulge              total_mass      False        11.4372      0.0840      0.1010
+disk+bulge              r_eff_disk      False        19.3411      4.5541      5.9514
+halo                    fdm             TIED          0.1836      0.0422      0.0534
+dispprof_LINE           sigma0          False        31.5159      6.7565      7.5634
+zheightgaus             sigmaz          TIED          3.2854      0.5010      0.6159
+geom_1                  inc             False        58.9403      6.1635      8.3578
+geom_1                  pa              False       146.3541      1.1877      2.1475
+geom_1                  xshift          False         0.3969      0.3520      0.3254
+geom_1                  yshift          False        -0.9203      0.2568      0.2438
+geom_1                  vel_shift       False        16.6010      2.8871      3.5617
+redchisq                -----           -----         3.2641      0.0000      0.0000
 ```
 
 ### Fit quality summary
@@ -268,8 +293,8 @@ print(f"Acceptance fraction: {np.mean(results.sampler_results['acceptance_fracti
 ```
 
 ```
-Reduced chi-squared : nan
-Acceptance fraction: 0.000
+Reduced chi-squared : 3.2641
+Acceptance fraction: 0.298
 ```
 
 ## Output files

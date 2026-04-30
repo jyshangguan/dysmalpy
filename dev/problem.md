@@ -932,3 +932,85 @@ no manual Cython installation or complex dependency management required.
 but the build system was still configured for the old Cython-based version. Making Cython
 optional throughout allows simple `pip install -e .` installation.
 
+
+---
+
+# Problem #28: MCMC Post-Sampling Analysis Fails with scipy.optimize.fmin
+
+**Date:** 2026-04-30
+**Status:** ✅ **FIXED** - Line 299 in `dysmalpy/fitting/utils.py`
+
+**Issue:** MCMC fitting crashes after sampling completes during posterior analysis
+
+**Symptoms:**
+```python
+ValueError: setting an array element with a sequence.
+TypeError: only 0-dimensional arrays can be converted to Python scalars
+```
+
+**Traceback:**
+```
+File "/home/shangguan/Softwares/my_modules/dysmalpy/dysmalpy/fitting/base.py", line 306, in analyze_plot_save_results
+    self.analyze_posterior_dist(gal=gal)
+File "/home/shangguan/Softwares/my_modules/dysmalpy/dysmalpy/fitting/base.py", line 496, in analyze_posterior_dist
+    param_bestfit = fit_utils.find_peak_gaussian_KDE(self.sampler.samples, peak_hist)
+File "/home/shangguan/Softwares/my_modules/dysmalpy/dysmalpy/fitting/utils.py", line 299, in find_peak_gaussian_KDE
+    peakvals[i] = fmin(lambda x: -kern(x), initval[i],disp=False)
+ValueError: setting an array element with a sequence.
+```
+
+**Root Cause:**
+
+In `dysmalpy/fitting/utils.py`, the `find_peak_gaussian_KDE()` function uses `scipy.optimize.fmin()`
+to find the peak of the posterior distribution. In newer scipy versions, `fmin()` always returns
+an array even when the input is scalar, but the code tries to assign it directly to a scalar
+array element `peakvals[i]`.
+
+**Code causing the issue (line 299):**
+```python
+peakvals[i] = fmin(lambda x: -kern(x), initval[i], disp=False)
+```
+
+`fmin()` returns an array like `[value]`, not a scalar, causing the assignment to fail.
+
+**Fix:**
+
+Extract the first element from the `fmin()` result:
+
+```python
+# Line 299 - Change from:
+peakvals[i] = fmin(lambda x: -kern(x), initval[i], disp=False)
+
+# To:
+peakvals[i] = fmin(lambda x: -kern(x), initval[i], disp=False)[0]
+```
+
+**Files Affected:**
+- `dysmalpy/fitting/utils.py` (line 299)
+
+**Impact:**
+- MCMC fitting completes successfully but crashes during post-sampling analysis
+- All MCMC-based fitting is broken
+- Results cannot be saved, plotted, or analyzed
+
+**Testing:**
+- Created test script: `dev/mcmc_demo_debug/test_mcmc_short.py`
+- Reproduces error with short chains (2 burn-in, 3 sampling steps)
+- Fix is backward compatible with older scipy versions
+
+**Verification:**
+After applying fix, MCMC should:
+1. Complete sampling
+2. Analyze posterior distributions
+3. Save results to pickle files
+4. Generate diagnostic plots (corner, trace, best-fit)
+5. Print results reports
+
+**Notes:**
+- This is a scipy version compatibility issue
+- The fix matches the pattern already used in lines 306-309 for the single-parameter case
+- `find_peak_gaussian_KDE_multiD()` (line 322) returns an array so it doesn't need this fix
+
+**Fix Applied:** 2026-04-30 09:58
+**Tested:** ✅ Successfully tested with `dev/mcmc_demo_debug/test_mcmc_short.py`
+**Result:** MCMC fitting now works correctly
