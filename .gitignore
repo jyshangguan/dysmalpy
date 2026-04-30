@@ -89,10 +89,7 @@ dysmalpy/models/cutils.html
 
 # Ignore everything in dev/ except specific files
 dev/*
-!dev/problem.md
 !dev/develop_log.md
-!dev/plan.md
-!dev/.gitignore
 
 demo/demo*output*
 PYTEST_OUTPUT
